@@ -1,0 +1,62 @@
+"""Pipeline orchestrator. One entry point, two speeds.
+
+    python pipeline/run.py daily     scrape recent days      ~5 min
+    python pipeline/run.py monthly   refit and export        ~10 min
+    python pipeline/run.py all       both
+
+Daily and monthly are separated because they change at different rates. New
+checklists arrive continuously, so scraping is cheap and frequent. Model
+coefficients describe how detection responds to hour, effort and weather —
+that does not move week to week, so refitting monthly is enough.
+
+Nothing here runs when a user opens the app. The app fetches its own weather
+forecast and applies the stored coefficients, so the rolling seven-day window
+advances on its own without the pipeline being involved.
+"""
+import subprocess
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+PY = sys.executable
+
+# eBird submissions trail the outing — people enter a weekend trip on Monday.
+# Scraping a date too soon gets only the log-in-the-field crowd, which is a
+# biased sample. Seven days is enough for submissions to settle.
+LAG_DAYS = 7
+WINDOW_DAYS = 7
+
+
+def run(script, *args):
+    print(f"\n{'=' * 60}\n  {script} {' '.join(args)}\n{'=' * 60}", flush=True)
+    r = subprocess.run([PY, str(ROOT / "pipeline" / script), *args])
+    if r.returncode != 0:
+        sys.exit(f"{script} failed with code {r.returncode}")
+
+
+def write_recent_days():
+    """Day list for the daily scrape: a settled window, not today."""
+    import json
+    end = date.today() - timedelta(days=LAG_DAYS)
+    days = [{"date": str(end - timedelta(days=i)), "kind": "daily",
+             "wind_max": 0.0} for i in range(WINDOW_DAYS)]
+    out = ROOT / "data" / "scrape_days.json"
+    out.write_text(json.dumps(sorted(days, key=lambda d: d["date"]), indent=2))
+    print(f"daily window: {days[-1]['date']} .. {days[0]['date']}")
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+    if mode in ("daily", "all"):
+        write_recent_days()
+        run("scrape_ebird.py")          # new checklists -> duckdb
+        run("backfill_locations.py")    # coordinates for any new sites
+
+    if mode in ("monthly", "all"):
+        run("build_model_table.py")     # + weather, one row per checklist
+        run("fit_logit.py")             # -> data/model_coefficients.json
+        run("publish.py")               # -> wherever the app reads from
+
+    print("\ndone.")

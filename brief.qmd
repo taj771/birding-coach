@@ -1,0 +1,92 @@
+---
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - margin=1.75cm
+      - top=1.4cm
+      - bottom=1.3cm
+    fontsize: 9.5pt
+    fig-pos: 'H'
+    linestretch: 1.02
+    colorlinks: true
+    linkcolor: petrol
+    urlcolor: petrol
+    include-in-header:
+      text: |
+        \usepackage{xcolor}
+        \definecolor{petrol}{HTML}{00897A}
+        \definecolor{amber}{HTML}{BE7A12}
+        \definecolor{rulegrey}{HTML}{C9D4D2}
+        \usepackage{titlesec}
+        \titleformat{\section}{\normalfont\bfseries\large\color{petrol}}{}{0pt}{}
+        \titlespacing*{\section}{0pt}{7pt}{2pt}
+        \usepackage{float}
+        \usepackage{caption}
+        \captionsetup{font=small,labelfont={bf,color=petrol},skip=3pt}
+        \setlength{\parskip}{4pt}
+        \setlength{\parindent}{0pt}
+        \usepackage{fancyhdr}
+        \pagestyle{fancy}\fancyhf{}
+        \renewcommand{\headrulewidth}{0pt}
+        \fancyfoot[C]{\footnotesize\textcolor{gray}{\thepage}}
+---
+
+\noindent{\LARGE\bfseries Birding Coach}\hfill{\small\textcolor{gray}{Tharaka Jayalath · 1 August 2026}}
+
+\vspace{1pt}
+
+\noindent{\large\textcolor{petrol}{Every birding app tells you \textit{where}. This one tells you \textit{when}.}}
+
+\vspace{3pt}
+\noindent\textcolor{rulegrey}{\rule{\linewidth}{0.9pt}}
+
+Tell it where you are and which bird you want. It gives back the closest hotspot
+and the hours worth going, using next week's forecast and what birders have
+actually recorded at those places.
+
+**Log.** People record what they saw, plus how long they birded, how far they
+walked, and whether they listed everything they could identify. Those last three
+are what other logging apps skip, and they are the ones that matter. Without
+them you have a pile of sightings and no way to judge what any one sighting was
+worth. The logs also drive a leaderboard, ranked by how many species you found
+against what the model expected for your effort. Someone birding an hour a week
+can beat someone birding forty.
+
+**Forecast.** Pick a bird, pick a spot. The app lists nearby eBird hotspots
+ordered by your chances rather than by how far away they are, then scores every
+hour of the coming week. Darker means better odds. Underneath, it breaks down
+where the number came from, so you can see that leaving at dawn bought you more
+than the weather did.
+
+## Behind it
+
+A logistic model of detection: the chance that someone birding the way you plan
+to, there, at that hour, reports the species.
+
+It is fitted on complete eBird checklists, meaning lists where the birder said
+they recorded everything they could identify. That matters more than it sounds.
+If a species is missing from a complete list, that is a real absence. Without it
+you can count sightings but you cannot compute a probability.
+
+Predictors are the checklist's own effort, the hour, the season, the site, and
+weather at that site's grid cell for the hours the outing covered. At prediction
+time the forecast goes in. The coefficients come from what has already been
+recorded.
+
+Right now it trains on eBird. As people log their own sightings, that feeds a
+recalibration layer, and the app can lean more on its own data over time.
+
+## Scope
+
+This runs on Allegheny County, Pennsylvania, which is a data problem rather than
+a modelling one. eBird has no bulk endpoint, so getting the denominator costs two
+API calls per checklist. That is roughly 4,650 calls for a month of one county,
+438,000 for a year of Pennsylvania, and over a million for a month of the whole
+country. Going wider means asking eBird for the Basic Dataset instead of
+scraping. I still need to work out how to get access to it.
+
+\vspace{2pt}
+\noindent\textcolor{rulegrey}{\rule{\linewidth}{0.4pt}}
+
+\noindent\footnotesize\textcolor{gray}{Data: eBird API 2.0, Cornell Lab of Ornithology; ERA5 reanalysis via Open-Meteo. Non-commercial use.}\normalsize

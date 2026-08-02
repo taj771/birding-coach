@@ -1,0 +1,23 @@
+# secrets
+.env
+*.key
+
+# data: eBird records are not redistributable, and these are large
+data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.csv
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# build artefacts
+brief_files/
+*.png
+.quarto/
+
+# os
+.DS_Store

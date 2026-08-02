@@ -1,0 +1,55 @@
+name: birding-coach pipeline
+
+on:
+  schedule:
+    - cron: '0 8 * * *'      # daily 08:00 UTC — scrape settled checklists
+    - cron: '0 9 1 * *'      # 1st of month  — refit and publish
+  workflow_dispatch:          # and a manual button
+    inputs:
+      mode:
+        description: 'daily | monthly | all'
+        default: 'daily'
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330       # under the 6h ceiling
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # the scraped database is the one thing that must survive between runs
+      - name: restore database
+        uses: actions/cache@v4
+        with:
+          path: data/birding.duckdb
+          key: birding-db-${{ github.run_id }}
+          restore-keys: birding-db-
+
+      - name: run pipeline
+        env:
+          EBIRD_API_KEY:        ${{ secrets.EBIRD_API_KEY }}
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SCRAPE_DELAY: '0.5'
+        run: |
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            # the monthly cron fires at 09:00; the daily one at 08:00
+            [ "$(date -u +%H)" = "09" ] && MODE=monthly || MODE=daily
+          fi
+          echo "mode: $MODE"
+          python pipeline/run.py "$MODE"
+
+      - name: keep the coefficients as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-coefficients
+          path: data/model_coefficients.*
+          if-no-files-found: ignore

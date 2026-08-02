@@ -1,0 +1,7 @@
+requests
+duckdb
+pandas
+python-dotenv
+pyarrow
+statsmodels
+scikit-learn

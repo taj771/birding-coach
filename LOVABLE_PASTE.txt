@@ -1,0 +1,211 @@
+Build a web app called **Birding Coach**. Birders log what they see, and the app
+tells them which hours in the next 7 days give them the best chance of seeing a
+chosen species.
+
+Stack: React + Supabase (auth, Postgres, edge functions). Mobile-first, works on
+desktop.
+
+## Database schema
+
+Create these tables with row-level security so users only read/write their own rows.
+
+```sql
+-- one row per birding outing, mirroring eBird's structure
+create table checklists (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  observed_on   date not null,
+  started_at    time not null,
+  latitude      double precision not null,
+  longitude     double precision not null,
+  site_name     text,
+  protocol      text not null check (protocol in ('stationary','traveling','incidental')),
+  duration_min  integer check (duration_min between 1 and 720),
+  distance_km   numeric(6,2),
+  party_size    integer not null default 1 check (party_size between 1 and 50),
+  complete_list boolean not null default false,
+  notes         text,
+  created_at    timestamptz not null default now()
+);
+
+-- one row per species seen on a checklist
+create table observations (
+  id            uuid primary key default gen_random_uuid(),
+  checklist_id  uuid not null references checklists(id) on delete cascade,
+  species_code  text not null,
+  count         integer,
+  unique (checklist_id, species_code)
+);
+
+-- reference list for the species picker
+create table species (
+  species_code  text primary key,
+  common_name   text not null,
+  scientific_name text
+);
+
+-- the fitted model, uploaded from an offline pipeline
+create table model_coefficients (
+  species_code  text not null,
+  term          text not null,     -- 'intercept' | 'hour_06' | 'log_duration' | 'wind_max' | ...
+  value         double precision not null,
+  fitted_at     timestamptz not null default now(),
+  primary key (species_code, term)
+);
+```
+
+Seed `species` with ~40 common North American birds (American Robin `amerob`,
+Northern Cardinal `norcar`, Blue Jay `blujay`, Song Sparrow `sonspa`, Tufted
+Titmouse `tuftit`, Mourning Dove `moudov`, American Goldfinch `amegfi`,
+Red-bellied Woodpecker `rebwoo`, Carolina Wren `carwre`, American Crow `amecro`,
+and similar).
+
+## Screens
+
+### 1. Auth
+Email + password sign-up and sign-in via Supabase. Nothing custom.
+
+### 2. Log a sighting
+
+Fields, **in this order**:
+
+```
+Where          map picker (default to browser geolocation), plus a text
+               field for a site name. Never ask the user to type coordinates.
+Date           date picker, defaults to today
+Start time     time picker
+How            radio: Stationary / Traveling / Incidental
+Duration       number input, minutes         (hide if Incidental)
+Distance       number input, km              (show only if Traveling)
+Party size     number input, default 1
+Species        searchable multi-select from `species`, with an optional
+               count per species
+Complete list  checkbox: "I'm reporting every species I could identify"
+               with helper text: "This is what makes your log usable for
+               predictions — it tells us what wasn't there, not just what was."
+```
+
+The effort fields (duration, distance, party size) and the complete-list
+checkbox are **required for non-incidental checklists**. They look like friction
+but they are the reason the data is modellable — do not make them optional or
+hide them behind an "advanced" toggle.
+
+### 3. My logs
+
+Table sorted newest first: date, site name, duration, number of species. Click a
+row to expand the species list. Small map showing the user's sites as pins.
+Summary strip: total checklists, total hours, distinct species.
+
+### 4. Forecast — this is the main screen
+
+Controls in a single row at the top:
+```
+Species   dropdown, searchable, from `species`
+Where     map picker or "use my location", plus recent sites
+Duration  dropdown: 15 min / 30 min / 1 hour / 2 hours / 3 hours
+```
+
+Below the controls, a **nearby hotspots** list — the eBird hotspots within 25 km
+of the chosen point, each showing its name, distance, and this species' best
+probability across the coming week. Sorted by that probability, highest first,
+not by distance. Selecting a hotspot re-runs the grid for its coordinates.
+
+Get hotspots from `https://api.ebird.org/v2/ref/hotspot/geo?lat=&lng=&dist=25&fmt=json`
+in a server function (needs the eBird key). Cache 24 hours — hotspots barely
+change. Score at most the 10 nearest so the page stays fast.
+
+Below, a heatmap grid:
+- rows = hours 05:00 through 21:00
+- columns = the next 7 days
+- each cell shows a percentage
+- colour intensity scales with probability; use a single-hue sequential ramp,
+  light for low and dark for high — not a rainbow, not red-to-green
+
+Under the grid, a summary line:
+```
+Best window: Thursday 07:00–08:00 — 74%
+```
+
+And a short "why" list showing the contribution of each factor, e.g.
+```
+dawn start        +18 points
+2 hours not 30    +11 points
+low wind Thursday  +3 points
+```
+
+Cells where the model has little data must render greyed with a tooltip
+"not enough data for this hour" rather than showing a number.
+
+## Edge functions
+
+### `forecast`
+```
+POST { species_code, latitude, longitude, duration_min }
+→ { grid: [{ date, hour, probability, sufficient_data }], best, drivers }
+```
+
+Steps:
+1. Fetch the 7-day hourly forecast from Open-Meteo (no API key needed):
+   `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation,wind_speed_10m,cloud_cover&forecast_days=7&timezone=auto`
+2. Load that species' rows from `model_coefficients`.
+3. For each day × hour, sum: `intercept + hour_{HH} + log_duration*ln(hours) + wind_max*wind + temp_mean*temp`
+4. `probability = 1 / (1 + exp(-sum))`
+5. Return the grid.
+
+**Until real coefficients are uploaded, use these placeholder values** so the UI
+is fully testable. They are shaped like the real thing, not random:
+```
+intercept     -0.40
+hour_05 -0.30   hour_06 +0.55   hour_07 +0.60   hour_08 +0.50
+hour_09 +0.20   hour_10  0.00   hour_11 -0.05   hour_12 -0.30
+hour_13 -0.28   hour_14 -0.32   hour_15 -0.25   hour_16 -0.30
+hour_17 -0.32   hour_18 -0.12   hour_19 -0.38   hour_20 -0.85
+log_duration  +0.75
+wind_max      -0.02
+temp_mean     +0.01
+```
+
+### `nearby`
+```
+GET ?latitude=&longitude=&dist=25&back=14
+→ recent species seen nearby
+```
+Proxy `https://api.ebird.org/v2/data/obs/geo/recent` with header
+`X-eBirdApiToken: {EBIRD_API_KEY}` from edge function secrets. Cache responses
+15 minutes, keyed on coordinates rounded to 1 decimal place, so many users share
+one upstream call.
+
+The eBird key must **never** reach the browser — all eBird calls go through this
+function.
+
+## Copy rules
+
+The number is a **detection probability**, not a guarantee a bird is present.
+Wording must reflect that:
+
+```
+✓  "74% of birders doing a 1-hour walk here at this hour reported this species"
+✓  "Your best window this week"
+✗  "There will be a Blue Jay"
+✗  "74% chance the bird is present"
+```
+
+Include a short "How this works" page: the model is fitted on complete eBird
+checklists; it predicts whether someone like you, birding the way you plan to,
+historically reported the species; time of day and how long you bird matter far
+more than weather.
+
+## Design
+
+Clean and quiet. Field-guide restraint, not a dashboard. One accent colour used
+sparingly — a deep teal works well against the greens birders expect. Generous
+whitespace, real type hierarchy, no gradient heroes, no emoji as section
+markers. The forecast heatmap is the visual centrepiece; everything else should
+recede.
+
+Dark mode supported, designed rather than auto-inverted.
+
+## Build order
+
+Build in this sequence and get each working before the next: auth → log form →
+my logs → forecast grid with placeholder coefficients → nearby → styling.
