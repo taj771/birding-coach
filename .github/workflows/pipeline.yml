@@ -24,13 +24,16 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # the scraped database is the one thing that must survive between runs
-      - name: restore database
+      # Everything in data/ must survive between runs: the checklist database,
+      # and the ERA5 weather cache which otherwise costs 9 API calls to rebuild.
+      # Unique key on save, prefix on restore — the documented pattern for a
+      # cache that changes every run. A stable key would restore but never save.
+      - name: restore data
         uses: actions/cache@v4
         with:
-          path: data/birding.duckdb
-          key: birding-db-${{ github.run_id }}
-          restore-keys: birding-db-
+          path: data
+          key: birding-data-${{ github.run_id }}
+          restore-keys: birding-data-
 
       - name: run pipeline
         env:
