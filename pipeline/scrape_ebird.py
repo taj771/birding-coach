@@ -31,6 +31,8 @@ DB = ROOT / "data" / "birding.duckdb"
 DAYS = ROOT / "data" / "scrape_days.json"
 DELAY = float(os.getenv("SCRAPE_DELAY", "0.4"))
 
+DB.parent.mkdir(exist_ok=True)      # fresh checkout has no data/
+
 BASE = "https://api.ebird.org/v2"
 HEADERS = {"X-eBirdApiToken": KEY}
 sess = requests.Session()
