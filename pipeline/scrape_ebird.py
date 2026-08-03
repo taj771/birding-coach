@@ -24,7 +24,8 @@ load_dotenv(ROOT / ".env")
 
 KEY = os.getenv("EBIRD_API_KEY")
 if not KEY:
-    sys.exit("EBIRD_API_KEY not set — put it in 02-birding-coach/.env")
+    sys.exit("EBIRD_API_KEY not set — put it in .env locally, or in\n"
+         "GitHub Settings > Secrets and variables > Actions")
 
 REGION = os.getenv("SCRAPE_REGION", "US-PA-003")  # Allegheny County
 DB = ROOT / "data" / "birding.duckdb"
