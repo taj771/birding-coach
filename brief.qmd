@@ -61,8 +61,9 @@ than the weather did.
 
 ## Behind it
 
-A logistic model of detection: the chance that someone birding the way you plan
-to, there, at that hour, reports the species.
+A penalised logistic model of detection: the chance that someone birding the
+way you plan to, there, at that hour, reports the species. One model per
+species, 67 of them.
 
 It is fitted on complete eBird checklists, meaning lists where the birder said
 they recorded everything they could identify. That matters more than it sounds.
@@ -73,6 +74,12 @@ Predictors are the checklist's own effort, the hour, the season, the site, and
 weather at that site's grid cell for the hours the outing covered. At prediction
 time the forecast goes in. The coefficients come from what has already been
 recorded.
+
+The penalty is what lets all 186 hotspots carry their own effect. A spot
+visited 89 times keeps its own estimate; one visited four times is pulled
+toward the county average. Without it, a hotspot where the bird was seen every
+single visit produces an infinite coefficient, which cost 30 of the 67 species
+when site effects were first added.
 
 Right now it trains on eBird. As people log their own sightings, that feeds a
 recalibration layer, and the app can lean more on its own data over time.
