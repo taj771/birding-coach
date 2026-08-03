@@ -35,6 +35,22 @@ jobs:
           key: birding-data-${{ github.run_id }}
           restore-keys: birding-data-
 
+      # fail loudly and specifically rather than deep inside a subprocess
+      - name: preflight
+        env:
+          EBIRD_API_KEY: ${{ secrets.EBIRD_API_KEY }}
+        run: |
+          echo "python:  $(python --version)"
+          echo "workdir: $(pwd)"
+          if [ -z "$EBIRD_API_KEY" ]; then
+            echo "::error::EBIRD_API_KEY secret is empty or missing."
+            echo "Settings -> Secrets and variables -> Actions."
+            echo "The name must be exactly EBIRD_API_KEY."
+            exit 1
+          fi
+          echo "EBIRD_API_KEY present (${#EBIRD_API_KEY} chars)"
+          python -c "import duckdb, pandas, sklearn, statsmodels, requests; print('imports ok')"
+
       - name: run pipeline
         env:
           EBIRD_API_KEY:        ${{ secrets.EBIRD_API_KEY }}
@@ -48,7 +64,7 @@ jobs:
             [ "$(date -u +%H)" = "09" ] && MODE=monthly || MODE=daily
           fi
           echo "mode: $MODE"
-          python pipeline/run.py "$MODE"
+          python -u pipeline/run.py "$MODE"
 
       - name: keep the coefficients as an artifact
         uses: actions/upload-artifact@v4
