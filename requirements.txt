@@ -5,3 +5,4 @@ python-dotenv
 pyarrow
 statsmodels
 scikit-learn
+huggingface_hub

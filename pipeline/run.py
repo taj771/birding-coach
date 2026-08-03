@@ -53,10 +53,16 @@ def write_recent_days():
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
 
+    # Every mode starts from the shared history. A runner's own disk only ever
+    # holds what it scraped itself — one rolling seven-day window — which is
+    # far too little to fit on and would quietly publish a worse model.
+    run("sync_db.py", "pull")
+
     if mode in ("daily", "all"):
         write_recent_days()
         run("scrape_ebird.py")          # new checklists -> duckdb
         run("backfill_locations.py")    # coordinates for any new sites
+        run("sync_db.py", "push")       # hand the new days back to the others
 
     if mode in ("monthly", "all"):
         run("build_model_table.py")     # + weather, one row per checklist

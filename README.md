@@ -84,12 +84,31 @@ Split by how fast things change. New checklists arrive continuously. How
 detection responds to hour, effort and weather does not move week to week.
 
 ```
+sync_db.py             pull and push the shared checklist database
 scrape_ebird.py        two API calls per checklist — eBird has no bulk endpoint
 backfill_locations.py  site coordinates, from the feed rather than per-site calls
 build_model_table.py   weather joined per grid cell, over the hours each outing spans
 fit_logit.py           one ridge logit per species -> model_coefficients.json
 publish.py             -> Supabase, a HF dataset, or a SQL file to paste
 ```
+
+### Where the database lives
+
+Not in git. eBird records are not redistributable and this repository is
+public, so `data/` is ignored — which leaves a scheduled runner with nowhere to
+accumulate. Each run would scrape its rolling seven-day window into an empty
+file and refit on one week of data.
+
+The database lives in a **private Hugging Face dataset** instead. Every run
+pulls it, appends what it scraped, and pushes it back. Both sides write, so the
+pull merges rather than overwrites: each table has a natural key
+(`sub_id`, `loc_id`, `(sub_id, species_code)`) and only missing rows are
+inserted. Running it twice adds nothing, the same idempotence the scraper
+already relies on when it re-reads overlapping days.
+
+Set `HF_DATASET` and `HF_TOKEN` (a **write** token) and it happens
+automatically. Leave them unset and the sync is skipped, so a local-only
+checkout still works.
 
 Scraping targets dates about a week old. eBird submissions trail the outing —
 people enter a weekend trip on Monday — so scraping fresh gets only the
