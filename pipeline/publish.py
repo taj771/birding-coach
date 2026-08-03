@@ -97,20 +97,19 @@ if __name__ == "__main__":
     rows = flatten(models)
     print(f"{len(models)} species, {len(rows):,} coefficient rows")
 
-    did = False
     url, key = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY")
     if url and key:
         n = push_supabase(rows, models, url.rstrip("/"), key)
         print(f"pushed {n:,} rows to Supabase")
-        did = True
 
     repo, token = os.getenv("HF_DATASET"), os.getenv("HF_TOKEN")
     if repo and token:
         print(f"uploaded model_coefficients.json to {push_hf(repo, token)}")
-        did = True
 
-    if not did:
-        SQL_OUT.write_text(to_sql(rows, models))
-        print(f"no credentials set — wrote {SQL_OUT.name} "
-              f"({SQL_OUT.stat().st_size/1024:.0f} KB)")
-        print("paste it into your SQL editor, or set SUPABASE_URL / HF_TOKEN")
+    # always, not as a fallback: the SQL file is what gets pasted into the
+    # app's editor by hand, and it was needed exactly when a HF token was
+    # also set — treating the upload as "done" made it silently disappear
+    SQL_OUT.write_text(to_sql(rows, models))
+    print(f"wrote {SQL_OUT.name} ({SQL_OUT.stat().st_size/1024:.0f} KB)")
+    if not (url and key):
+        print("paste it into your SQL editor, or set SUPABASE_URL to push directly")
