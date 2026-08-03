@@ -39,6 +39,8 @@ jobs:
       - name: preflight
         env:
           EBIRD_API_KEY: ${{ secrets.EBIRD_API_KEY }}
+          HF_DATASET:    ${{ secrets.HF_DATASET }}
+          HF_TOKEN:      ${{ secrets.HF_TOKEN }}
         run: |
           echo "python:  $(python --version)"
           echo "workdir: $(pwd)"
@@ -54,11 +56,35 @@ jobs:
             echo "::warning::the secret contains whitespace — it is stripped in"
             echo "code, but re-saving it without the stray newline is tidier"
           fi
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_DATASET" ]; then
+            echo "::error::HF_DATASET and HF_TOKEN are both required."
+            echo "The checklist history lives in a private Hugging Face"
+            echo "dataset. Without them this runner would scrape into an"
+            echo "empty database and refit on one week of data."
+            exit 1
+          fi
+          echo "HF_DATASET: $HF_DATASET"
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"].strip())
+          role = api.whoami().get("auth", {}).get("accessToken", {}).get("role")
+          print(f"HF token role: {role}")
+          # a read token pulls fine and then fails at the end of the run,
+          # after the whole scrape has already been spent
+          assert role == "write", "HF_TOKEN must be a write token"
+          info = api.repo_info(os.environ["HF_DATASET"].strip(), repo_type="dataset")
+          print(f"HF dataset: {info.id} (private={info.private})")
+          PY
           python -c "import duckdb, pandas, sklearn, statsmodels, requests; print('imports ok')"
 
       - name: run pipeline
         env:
           EBIRD_API_KEY:        ${{ secrets.EBIRD_API_KEY }}
+          # the checklist database lives in a private HF dataset, not in git —
+          # without these the runner starts from an empty seven-day window
+          HF_DATASET:           ${{ secrets.HF_DATASET }}
+          HF_TOKEN:             ${{ secrets.HF_TOKEN }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SCRAPE_DELAY: '0.5'
