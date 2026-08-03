@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
-KEY = os.environ["EBIRD_API_KEY"]
+KEY = os.environ["EBIRD_API_KEY"].strip()
 REGION = os.getenv("SCRAPE_REGION", "US-PA-003")
 DB = ROOT / "data" / "birding.duckdb"
 

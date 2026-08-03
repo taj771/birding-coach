@@ -22,7 +22,9 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
 
-KEY = os.getenv("EBIRD_API_KEY")
+# .strip() matters: a secret pasted with a trailing newline makes requests
+# raise InvalidHeader on every call, which looks like an API outage
+KEY = (os.getenv("EBIRD_API_KEY") or "").strip()
 if not KEY:
     sys.exit("EBIRD_API_KEY not set — put it in .env locally, or in\n"
          "GitHub Settings > Secrets and variables > Actions")
