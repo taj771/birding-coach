@@ -13,6 +13,7 @@ surfaced in a UI.
 """
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -46,7 +47,13 @@ if __name__ == "__main__":
     con = duckdb.connect(str(DB), read_only=True)
     days = [str(r[0]) for r in
             con.execute("SELECT DISTINCT obs_date FROM checklists ORDER BY 1").fetchall()]
+    n_ck = con.execute("SELECT count(*) FROM checklists").fetchone()[0]
     con.close()
+    if not days:
+        sys.exit(f"no checklists in {DB.name} ({n_ck} rows) — nothing to "
+                 f"backfill. Run the scrape first; if it just ran, it stored "
+                 f"nothing and that is the real failure.")
+    print(f"{n_ck:,} checklists across {len(days)} days", flush=True)
     rows = {}
     for i, date in enumerate(days, 1):
         for item in fetch_day(date):
@@ -68,11 +75,13 @@ if __name__ == "__main__":
     missing = con.execute("""
         SELECT count(DISTINCT c.loc_id) FROM checklists c
         LEFT JOIN locations l USING (loc_id) WHERE l.loc_id IS NULL""").fetchone()[0]
-    hot = con.execute("SELECT sum(is_hotspot::INT), count(*) FROM locations").fetchone()
+    hot = con.execute("SELECT coalesce(sum(is_hotspot::INT), 0), count(*) "
+                      "FROM locations").fetchone()
     con.close()
 
     print(f"\nresolved {n_have} locations, {n_need} needed, {missing} still missing")
-    print(f"hotspots: {hot[0]} of {hot[1]}  ({hot[0]/hot[1]:.0%})")
+    pct = f"  ({hot[0]/hot[1]:.0%})" if hot[1] else ""
+    print(f"hotspots: {hot[0]} of {hot[1]}{pct}")
     print(f"lat range {df.lat.min():.3f} to {df.lat.max():.3f}")
     print(f"lon range {df.lon.min():.3f} to {df.lon.max():.3f}")
     span_km = (df.lat.max()-df.lat.min())*111

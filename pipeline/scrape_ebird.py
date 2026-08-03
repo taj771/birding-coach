@@ -179,6 +179,10 @@ if __name__ == "__main__":
     """).fetchone()
 
     print(f"\n=== done in {(time.time()-t0)/60:.1f} min, {calls} calls ===")
+    if n_ck == 0:
+        con.close()
+        sys.exit("stored zero checklists. Either every requested date returned "
+                 "nothing, or the feed calls failed — check the HTTP lines above.")
     print(f"  checklists   {n_ck:,}")
     print(f"  observations {n_obs:,}")
     print(f"  species      {n_sp:,}")
