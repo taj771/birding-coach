@@ -21,6 +21,10 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 PY = sys.executable
 
+# data/ is gitignored — eBird records are not redistributable — so a fresh
+# checkout has no such directory and every write below would fail
+(ROOT / "data").mkdir(exist_ok=True)
+
 # eBird submissions trail the outing — people enter a weekend trip on Monday.
 # Scraping a date too soon gets only the log-in-the-field crowd, which is a
 # biased sample. Seven days is enough for submissions to settle.
