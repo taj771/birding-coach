@@ -48,7 +48,12 @@ jobs:
             echo "The name must be exactly EBIRD_API_KEY."
             exit 1
           fi
-          echo "EBIRD_API_KEY present (${#EBIRD_API_KEY} chars)"
+          CLEAN=$(printf '%s' "$EBIRD_API_KEY" | tr -d '[:space:]')
+          echo "EBIRD_API_KEY present (${#EBIRD_API_KEY} chars, ${#CLEAN} after trimming)"
+          if [ "${#EBIRD_API_KEY}" != "${#CLEAN}" ]; then
+            echo "::warning::the secret contains whitespace — it is stripped in"
+            echo "code, but re-saving it without the stray newline is tidier"
+          fi
           python -c "import duckdb, pandas, sklearn, statsmodels, requests; print('imports ok')"
 
       - name: run pipeline
