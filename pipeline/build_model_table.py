@@ -26,26 +26,54 @@ OUT = ROOT / "data" / "pa_model_table.parquet"
 VARS = "temperature_2m,precipitation,wind_speed_10m,cloud_cover,relative_humidity_2m,pressure_msl"
 
 
-def fetch_weather(cells, year=2025):
-    """One hourly series per 0.25 deg grid cell."""
-    if WX.exists():
-        return pd.read_parquet(WX)
-    frames = []
-    for clat, clon in cells:
-        r = requests.get(
-            "https://archive-api.open-meteo.com/v1/archive",
-            params={"latitude": clat, "longitude": clon,
-                    "start_date": f"{year}-01-01", "end_date": f"{year}-12-31",
-                    "hourly": VARS, "timezone": "America/New_York"},
-            timeout=90)
-        r.raise_for_status()
-        f = pd.DataFrame(r.json()["hourly"])
-        f["clat"], f["clon"] = clat, clon
+def fetch_one(clat, clon, lo, hi):
+    r = requests.get(
+        "https://archive-api.open-meteo.com/v1/archive",
+        params={"latitude": clat, "longitude": clon,
+                "start_date": str(lo.date()), "end_date": str(hi.date()),
+                "hourly": VARS, "timezone": "America/New_York"},
+        timeout=90)
+    r.raise_for_status()
+    f = pd.DataFrame(r.json()["hourly"])
+    f["ts"] = pd.to_datetime(f.pop("time"))
+    f["clat"], f["clon"] = clat, clon
+    return f
+
+
+def fetch_weather(need):
+    """Hourly series covering every (cell, date) the checklists require.
+
+    `need` is the set of pairs actually used, not a date range guessed in
+    advance. The previous version returned the cache whenever the file merely
+    existed, and the fetch it guarded covered a hardcoded year — so once the
+    database grew past that year, new checklists silently matched no weather
+    rows. An empty slice is not loud: the means came out NaN, but the
+    precipitation SUM came out 0.0, which reads as a real dry day.
+    """
+    have = pd.read_parquet(WX) if WX.exists() else None
+    covered = (set(zip(have.clat, have.clon, have.ts.dt.normalize()))
+               if have is not None else set())
+    missing = sorted(p for p in need if p not in covered)
+    if not missing:
+        print(f"    weather cache covers all {len(need):,} (cell, date) pairs")
+        return have
+
+    by_cell = {}
+    for clat, clon, d in missing:
+        by_cell.setdefault((clat, clon), []).append(d)
+    print(f"    {len(missing):,} (cell, date) pairs missing "
+          f"across {len(by_cell)} cells — fetching")
+
+    frames = [have] if have is not None else []
+    for (clat, clon), dates in sorted(by_cell.items()):
+        lo, hi = min(dates), max(dates)
+        f = fetch_one(clat, clon, lo, hi)
         frames.append(f)
-        print(f"    cell {clat:.2f},{clon:.2f}  {len(f):,} hours", flush=True)
-    w = pd.concat(frames, ignore_index=True)
-    w["ts"] = pd.to_datetime(w.time)
-    w = w.drop(columns=["time"])
+        print(f"    cell {clat:.2f},{clon:.2f}  {lo.date()}..{hi.date()}  "
+              f"{len(f):,} hours", flush=True)
+
+    w = (pd.concat(frames, ignore_index=True)
+           .drop_duplicates(subset=["clat", "clon", "ts"], keep="last"))
     w.to_parquet(WX)
     return w
 
@@ -105,14 +133,34 @@ def window_weather(c, w):
 if __name__ == "__main__":
     c, obs = checklists()
     print(f"checklists after filters: {len(c):,}")
+    print(f"dates: {c.obs_date.min()} .. {c.obs_date.max()}")
 
-    cells = sorted(set(zip((c.lat / 0.25).round() * 0.25,
-                           (c.lon / 0.25).round() * 0.25)))
-    print(f"distinct 0.25deg cells: {len(cells)}")
-    w = fetch_weather(cells)
+    # every (cell, date) a checklist will look up, plus the following day,
+    # since an evening outing runs past midnight into the next day's series
+    clat = (c.lat / 0.25).round() * 0.25
+    clon = (c.lon / 0.25).round() * 0.25
+    d = pd.to_datetime(c.obs_date)
+    need = set(zip(clat, clon, d)) | set(zip(clat, clon, d + pd.Timedelta(days=1)))
+    print(f"distinct 0.25deg cells: {len(set(zip(clat, clon)))}")
+    w = fetch_weather(need)
     print(f"weather rows: {len(w):,}")
 
     m = window_weather(c, w)
+
+    # A checklist whose hours fall outside the weather series yields an empty
+    # slice, and pandas reports that as NaN for the means but 0.0 for the
+    # precipitation sum — a gap that reads as a real dry day. Refuse to write
+    # a table with any of it rather than let a fit train on invented weather.
+    WXCOLS = ["wind_max", "temp_mean", "cloud_mean", "humid_mean"]
+    bad = m[m[WXCOLS].isna().any(axis=1) | (m.n_wx_hours == 0)]
+    if len(bad):
+        by_date = bad.groupby(bad.obs_date.astype(str)).size()
+        raise SystemExit(
+            f"{len(bad):,} of {len(m):,} checklists have no weather.\n"
+            f"affected dates:\n{by_date.to_string()}\n"
+            "The Open-Meteo archive lags real time by a few days; if these "
+            "dates are recent, wait and re-run. Otherwise delete "
+            f"{WX.name} to force a full refetch.")
     m["date"] = pd.to_datetime(m.obs_date)
     m["doy"] = m.date.dt.dayofyear
     m["log_dur"] = np.log(m.duration_hrs)
