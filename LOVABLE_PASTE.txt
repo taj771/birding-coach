@@ -170,7 +170,7 @@ interface HourWeather {
   cloudMean: number;
 }
 
-/** Week index must match the pipeline's `dayOfYear // 7`. */
+/** Week index must match Python's `doy // 7`. */
 export function weekOf(d: Date): number {
   const start = Date.UTC(d.getUTCFullYear(), 0, 0);
   const doy = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(),
@@ -206,6 +206,11 @@ export function modelledWeeks(c: Coef): number[] {
     .sort((a, b) => a - b);
 }
 
+/**
+ * One cell of the grid. Returns null when the model cannot back a number —
+ * too little data for that hour, or no fitted term for that week. The UI greys
+ * those; see `unavailable` for which of the two it was.
+ */
 export function score(
   c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
   locId?: string, minSupport = 50,
@@ -232,7 +237,7 @@ export function score(
     (c.precip_sum ?? 0) * w.precipSum +
     (c.cloud_mean ?? 0) * w.cloudMean;
 
-  return 1 / (1 + Math.exp(-logit));
+  return 1 / (1 + Math.exp(-logit));   // the only real maths in the file
 }
 
 /**
@@ -245,6 +250,8 @@ export function drivers(
   c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
   locId?: string,
 ) {
+  // minSupport 0 here on purpose: the caller has already decided this cell
+  // is worth showing, and the breakdown must not disagree with the number
   const at = (h: number, out: Outing, wx: HourWeather) =>
     score(c, date, h, out, wx, locId, 0)!;
   const actual = at(hour, o, w);
@@ -299,9 +306,29 @@ export function grid(
 }
 
 /** True when the model knows this specific place, rather than falling back
- *  to the county baseline. */
+ *  to the county baseline. The UI should mark the difference — a pin on an
+ *  unmodelled spot is an Allegheny-wide estimate, not a local one. */
 export function hasSiteEffect(c: Coef, locId: string): boolean {
   return c[`site_${locId}`] !== undefined;
+}
+
+/** Bounding box of the sites the model was fitted on: Allegheny County, PA,
+ *  about 53 km across either way. */
+export const EXTENT = { latMin: 40.19, latMax: 40.68,
+                        lonMin: -80.34, lonMax: -79.69 };
+
+/**
+ * Whether a point is somewhere this model can speak about at all.
+ *
+ * Nothing in `score` knows where it is. A pin in Philadelphia matches none of
+ * the 192 hotspot terms, falls back to the pooled `site_PERSONAL` baseline,
+ * and returns a confident number built entirely from Allegheny County's
+ * intercept, hours and weeks. The failure is invisible unless it is checked
+ * here, so check it before scoring rather than trusting the caller.
+ */
+export function inCoverage(lat: number, lon: number): boolean {
+  return lat >= EXTENT.latMin && lat <= EXTENT.latMax
+      && lon >= EXTENT.lonMin && lon <= EXTENT.lonMax;
 }
 ```
 
@@ -320,6 +347,18 @@ the UI must say so rather than show a number.
 **Sites.** 192 eBird hotspots have their own effect. Anywhere else uses a pooled
 county baseline, which is a weaker answer. Use `hasSiteEffect()` and label the
 difference.
+
+**Geography.** The model was fitted on Allegheny County, Pennsylvania only —
+about 53 km across, bounded by `EXTENT` in `score.ts`. This is the constraint
+most likely to be missed, because nothing in `score()` knows where it is. A pin
+in Philadelphia matches none of the hotspot terms, falls back to the pooled
+baseline, and returns a confident number assembled entirely from Pittsburgh's
+intercept, hours and weeks. Call `inCoverage(lat, lon)` before scoring anything
+and refuse outside it. Do not degrade gracefully here — a wrong number is worse
+than no number, because the user has no way to tell it is wrong.
+
+Logging is different: a user can log a sighting anywhere in the world. Only the
+forecast is bounded.
 
 ## Screens
 
@@ -367,6 +406,20 @@ Species   searchable dropdown from `species`
 Where     map picker or "use my location", plus recent sites
 Duration  15 min / 30 min / 1 hour / 2 hours / 3 hours
 ```
+
+**Out of area.** If `inCoverage(lat, lon)` is false, replace the whole forecast
+with a short panel — do not render a grid, greyed or otherwise:
+
+```
+Birding Coach currently covers Allegheny County, Pennsylvania.
+We have no data for this location, so there is nothing to forecast.
+
+You can still log sightings here — they count toward your list.
+```
+
+Show the county outline on the map so the boundary is obvious rather than a
+rejection the user has to guess at. Default the map to Pittsburgh, not to
+browser geolocation, so a user in another state does not land on an error.
 
 **Coverage strip**, directly under the controls and always visible. The model
 cannot answer for most of the year and the user must know that before reading

@@ -174,3 +174,22 @@ export function grid(
 export function hasSiteEffect(c: Coef, locId: string): boolean {
   return c[`site_${locId}`] !== undefined;
 }
+
+/** Bounding box of the sites the model was fitted on: Allegheny County, PA,
+ *  about 53 km across either way. */
+export const EXTENT = { latMin: 40.19, latMax: 40.68,
+                        lonMin: -80.34, lonMax: -79.69 };
+
+/**
+ * Whether a point is somewhere this model can speak about at all.
+ *
+ * Nothing in `score` knows where it is. A pin in Philadelphia matches none of
+ * the 192 hotspot terms, falls back to the pooled `site_PERSONAL` baseline,
+ * and returns a confident number built entirely from Allegheny County's
+ * intercept, hours and weeks. The failure is invisible unless it is checked
+ * here, so check it before scoring rather than trusting the caller.
+ */
+export function inCoverage(lat: number, lon: number): boolean {
+  return lat >= EXTENT.latMin && lat <= EXTENT.latMax
+      && lon >= EXTENT.lonMin && lon <= EXTENT.lonMax;
+}
