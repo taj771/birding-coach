@@ -52,6 +52,11 @@ TEMPLATE = """<!doctype html>
   .weeks i { flex:1; height:16px; background:var(--line); border-radius:1px; }
   .weeks i.on { background:var(--accent); }
   .weeks i.now { outline:2px solid #BE7A12; outline-offset:1px; }
+  .wx { display:grid; grid-template-columns:auto 1fr 32px; gap:4px 8px;
+        align-items:center; font-size:12px; }
+  .wx input { padding:0; }
+  .wx b { text-align:right; font-variant-numeric:tabular-nums;
+          font-weight:600; color:var(--accent); }
   .legend { display:flex; align-items:center; gap:6px; font-size:11px;
             color:var(--muted); margin-top:10px; }
   .ramp { flex:1; height:9px; border-radius:5px;
@@ -80,7 +85,21 @@ TEMPLATE = """<!doctype html>
     <option value="3">3 hours</option>
   </select>
 
+  <label>Weather <span class="sub" style="text-transform:none">— the app fills
+    these from the forecast</span></label>
+  <div class="wx">
+    <span>Wind</span><input type="range" id="wind" min="0" max="36" value="12">
+      <b id="windv">12</b>
+    <span>Temp</span><input type="range" id="temp" min="-5" max="32" value="18">
+      <b id="tempv">18</b>
+    <span>Rain</span><input type="range" id="rain" min="0" max="18" step="0.5" value="0">
+      <b id="rainv">0</b>
+    <span>Cloud</span><input type="range" id="cloud" min="0" max="100" value="60">
+      <b id="cloudv">60</b>
+  </div>
+
   <div id="coverage"></div>
+  <div id="wxeffect"></div>
 
   <label>Weeks the model covers</label>
   <div class="weeks" id="weeks"></div>
@@ -149,8 +168,16 @@ L.rectangle([[EXTENT.latMin, EXTENT.lonMin], [EXTENT.latMax, EXTENT.lonMax]],
 
 const layer = L.layerGroup().addTo(map);
 
-// median-ish conditions; the preview is about the map, not the forecast
-const WEATHER = { windMax:12, tempMean:18, precipSum:0, cloudMean:60 };
+// In the app these come from Open-Meteo's 7-day hourly forecast. Here they are
+// sliders, because every forecastable date falls in a week the model has no
+// term for — a live fetch would only ever show the gap panel. Sliders also make
+// the size of the weather effect visible, which a fetch would not.
+const WX_IDS = { windMax:"wind", tempMean:"temp", precipSum:"rain", cloudMean:"cloud" };
+const weather = () => Object.fromEntries(Object.entries(WX_IDS).map(
+  ([k, id]) => [k, Number(document.getElementById(id).value)]));
+
+// what the model was fitted around; the reference the weather effect is measured against
+const WX_MEDIAN = { windMax:12, tempMean:18, precipSum:0, cloudMean:60 };
 
 const spSel = document.getElementById("sp");
 Object.keys(COEF).sort().forEach(k => {
@@ -215,13 +242,25 @@ function draw() {
     return;
   }
 
+  const wx = weather();
   const scored = HOTSPOTS.map(h => ({
-    ...h, p: score(c, date, hour, o, WEATHER, h.loc_id),
+    ...h, p: score(c, date, hour, o, wx, h.loc_id),
   })).filter(h => h.p !== null).sort((a,b) => b.p - a.p);
 
   const hi = scored[0].p, lo = scored[scored.length-1].p;
   cov.innerHTML = `<div class="note">${scored.length} hotspots scored.
     Range ${(lo*100).toFixed(1)}% to ${(hi*100).toFixed(1)}%.</div>`;
+
+  // how much the weather sliders are worth, at the best site, against median
+  const best = scored[0];
+  const atMedian = score(c, date, hour, o, WX_MEDIAN, best.loc_id);
+  const delta = (best.p - atMedian) * 100;
+  document.getElementById("wxeffect").innerHTML =
+    `<div class="note">Weather is worth <b>${delta >= 0 ? "+" : ""}${delta.toFixed(1)}
+     points</b> at ${best.name}, against median conditions
+     (wind 12, 18&deg;C, no rain, 60% cloud).<br>
+     <span style="color:var(--muted)">Same outing at median weather:
+     ${(atMedian*100).toFixed(1)}% &middot; now: ${(best.p*100).toFixed(1)}%</span></div>`;
 
   scored.forEach(h => {
     const t = hi === lo ? 0.5 : (h.p - lo) / (hi - lo);
@@ -238,8 +277,15 @@ function draw() {
     `<tr><td>${h.name}</td><td>${(h.p*100).toFixed(1)}%</td></tr>`).join("");
 }
 
-[spSel, dateEl, hrSel, document.getElementById("dur")]
-  .forEach(el => el.addEventListener("input", draw));
+const inputs = [spSel, dateEl, hrSel, document.getElementById("dur"),
+                ...Object.values(WX_IDS).map(id => document.getElementById(id))];
+inputs.forEach(el => el.addEventListener("input", () => {
+  for (const id of Object.values(WX_IDS)) {
+    document.getElementById(id + "v").textContent =
+      document.getElementById(id).value;
+  }
+  draw();
+}));
 draw();
 </script>
 """
