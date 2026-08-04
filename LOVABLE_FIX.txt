@@ -399,3 +399,51 @@ minutes, median wind) so the numbers shown actually reconcile with the total.
 Auth, the log form and its required effort fields, "my logs", the eBird hotspot
 proxy and its caching, the copy rules about detection probability, and the
 visual design. Those were right and nothing about the model changes them.
+
+---
+
+## 7. Maps: Leaflet and OpenStreetMap, no API key
+
+If the map currently uses Mapbox, Google Maps, or anything else needing an API
+key or a billing account, replace it. Use `react-leaflet` with OpenStreetMap
+tiles — free, no token, no sign-up.
+
+```
+npm i leaflet react-leaflet
+```
+
+```tsx
+import { MapContainer, TileLayer, Marker, Rectangle } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+
+// Attribution is required by the OpenStreetMap tile usage policy.
+<MapContainer center={[40.44, -79.99]} zoom={10}>
+  <TileLayer
+    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  />
+  ...
+</MapContainer>
+```
+
+Two known Leaflet gotchas, both of which look like the map is broken:
+
+- The container needs an explicit height. `MapContainer` with no `height` in CSS
+  renders zero pixels tall and the map appears missing entirely.
+- The default marker icons resolve to broken image paths under a bundler. Import
+  the marker images explicitly or set a custom `L.Icon`.
+
+**Draw the coverage area as a rectangle, not the county's true outline.**
+
+```tsx
+<Rectangle bounds={[[40.19, -80.34], [40.68, -79.69]]}
+           pathOptions={{ color: "#00897A", weight: 1, fillOpacity: 0.05 }} />
+```
+
+Those are the exact bounds `inCoverage()` tests. The real county boundary is an
+irregular shape that does not match them, so drawing it would tell the user the
+forecast works in places it refuses and refuses in places it works. Show the
+rectangle the code actually enforces.
+
+For the log form's location picker, a click handler that sets a marker is
+enough. No geocoding service, no address search — those need keys too.
