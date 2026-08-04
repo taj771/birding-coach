@@ -15,7 +15,12 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).parent.parent
+# without this a local run reads none of the credentials the other scripts do,
+# so the same command publishes to different places depending on the machine
+load_dotenv(ROOT / ".env")
 SRC = ROOT / "data" / "model_coefficients.json"
 SQL_OUT = ROOT / "data" / "model_coefficients.sql"
 
