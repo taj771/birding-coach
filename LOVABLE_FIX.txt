@@ -447,3 +447,51 @@ rectangle the code actually enforces.
 
 For the log form's location picker, a click handler that sets a marker is
 enough. No geocoding service, no address search — those need keys too.
+
+---
+
+## 8. Hotspots come from a table, not from the eBird API
+
+Remove the runtime call to `api.ebird.org/v2/ref/hotspot/geo` and the caching
+around it. I will paste a `hotspots` table with 192 rows:
+
+```sql
+create table if not exists hotspots (
+  loc_id        text primary key,
+  name          text not null,
+  latitude      double precision not null,
+  longitude     double precision not null,
+  n_checklists  integer not null
+);
+```
+
+These are exactly the hotspots the model carries a site effect for. Every other
+hotspot in the county falls back to the pooled baseline, so querying eBird live
+would mostly return places the model cannot speak to — pins that look like local
+predictions but are county averages.
+
+This removes the eBird key from the app entirely, along with the server-side
+proxy and its cache. Drop the `nearby` edge function too unless it is already
+working; the app then talks only to Supabase and to Open-Meteo, neither of
+which needs a secret.
+
+**On the map**, show all 192 as pins. Scale or shade each by its probability
+for the selected species once a species is chosen. `n_checklists` is how many
+times that spot appears in the training data — use it to convey confidence, and
+sort ties by it. The range is wide:
+
+```
+Frick Park--Beechwood Entrance     164 checklists
+Beechwood Farms Nature Reserve     106
+...
+many sites                           3-5
+```
+
+**The nearby list** becomes a query against this table rather than an API call:
+compute distance from the user's point in the client, keep those within 25 km,
+score each, and sort by probability rather than distance. There is no rate limit
+and no latency, so there is no reason to cap it at 10 — score all of them.
+
+Selecting a pin passes its `loc_id` to `score()` so it uses that site's own
+effect. Every pin in this table returns true from `hasSiteEffect()`, so the
+"county-wide estimate" label only appears for a point the user drops themselves.
