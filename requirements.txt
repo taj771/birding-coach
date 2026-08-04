@@ -1,8 +1,23 @@
-requests
-duckdb
-pandas
-python-dotenv
-pyarrow
-statsmodels
-scikit-learn
-huggingface_hub
+# Pinned, not floating. A local and a cloud fit of the same data were checked
+# against each other and agreed to 1e-6 on all 17,526 coefficients — but that
+# held because both machines happened to install the same versions. Left
+# unpinned, the monthly cron resolves whatever is newest on the day, and a
+# changed solver default or encoder ordering would shift the published
+# coefficients with nothing to compare against.
+#
+# numpy and scipy are pinned even though nothing imports them directly: they
+# are what actually does the arithmetic, so they decide the numbers.
+#
+# To move to newer versions, bump them here, refit, and diff the coefficients
+# against the previous run before publishing.
+
+requests==2.34.2
+duckdb==1.5.5
+pandas==3.0.5
+python-dotenv==1.2.2
+pyarrow==25.0.0
+numpy==2.5.1
+scipy==1.18.0
+statsmodels==0.14.6
+scikit-learn==1.9.0
+huggingface_hub==1.26.0

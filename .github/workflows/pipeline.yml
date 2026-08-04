@@ -27,7 +27,9 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # matched to the machine the model is developed on, for the same
+          # reason requirements.txt is pinned
+          python-version: '3.13'
           cache: pip
 
       - run: pip install -r requirements.txt
@@ -99,7 +101,15 @@ jobs:
               print(f"::warning::could not read the token role ({type(e).__name__}). "
                     "Continuing — a read-only token would fail at the final push.")
           PY
-          python -c "import duckdb, pandas, sklearn, statsmodels, requests; print('imports ok')"
+          # printed so a run that produced unexpected coefficients can be
+          # traced to what it was actually built against
+          python - <<'PY'
+          import platform
+          import duckdb, numpy, pandas, requests, scipy, sklearn, statsmodels
+          print(f"python {platform.python_version()} {platform.machine()}")
+          for m in (numpy, scipy, pandas, sklearn, statsmodels, duckdb, requests):
+              print(f"  {m.__name__:12} {m.__version__}")
+          PY
 
       - name: run pipeline
         env:
