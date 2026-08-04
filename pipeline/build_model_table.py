@@ -10,6 +10,7 @@ Weather is aggregated over the hours a checklist actually spans, not just its
 start hour — max wind (a gust masks song; the mean hides it), summed precip,
 mean temp.
 """
+import time
 import warnings
 from pathlib import Path
 
@@ -26,18 +27,35 @@ OUT = ROOT / "data" / "pa_model_table.parquet"
 VARS = "temperature_2m,precipitation,wind_speed_10m,cloud_cover,relative_humidity_2m,pressure_msl"
 
 
-def fetch_one(clat, clon, lo, hi):
-    r = requests.get(
-        "https://archive-api.open-meteo.com/v1/archive",
-        params={"latitude": clat, "longitude": clon,
-                "start_date": str(lo.date()), "end_date": str(hi.date()),
-                "hourly": VARS, "timezone": "America/New_York"},
-        timeout=90)
-    r.raise_for_status()
-    f = pd.DataFrame(r.json()["hourly"])
-    f["ts"] = pd.to_datetime(f.pop("time"))
-    f["clat"], f["clon"] = clat, clon
-    return f
+def fetch_one(clat, clon, lo, hi, attempts=4):
+    """One cell's hourly series, with backoff.
+
+    Open-Meteo is free and occasionally slow rather than down, so a single
+    read timeout used to end the whole build — including the cells that had
+    already come back.
+    """
+    for i in range(attempts):
+        try:
+            r = requests.get(
+                "https://archive-api.open-meteo.com/v1/archive",
+                params={"latitude": clat, "longitude": clon,
+                        "start_date": str(lo.date()), "end_date": str(hi.date()),
+                        "hourly": VARS, "timezone": "America/New_York"},
+                timeout=120)
+            if r.status_code == 429:              # free tier, minute quota
+                time.sleep(30 * (i + 1))
+                continue
+            r.raise_for_status()
+            f = pd.DataFrame(r.json()["hourly"])
+            f["ts"] = pd.to_datetime(f.pop("time"))
+            f["clat"], f["clon"] = clat, clon
+            return f
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if i == attempts - 1:
+                raise
+            print(f"      {type(e).__name__}, retry {i + 1}/{attempts - 1}",
+                  flush=True)
+            time.sleep(5 * (i + 1))
 
 
 def fetch_weather(need):
@@ -65,17 +83,29 @@ def fetch_weather(need):
           f"across {len(by_cell)} cells — fetching")
 
     frames = [have] if have is not None else []
+
+    def save():
+        w = (pd.concat(frames, ignore_index=True)
+               .drop_duplicates(subset=["clat", "clon", "ts"], keep="last"))
+        w.to_parquet(WX)
+        return w
+
     for (clat, clon), dates in sorted(by_cell.items()):
         lo, hi = min(dates), max(dates)
-        f = fetch_one(clat, clon, lo, hi)
+        try:
+            f = fetch_one(clat, clon, lo, hi)
+        except Exception:
+            # keep whatever came back; the next run resumes from here rather
+            # than asking Open-Meteo for all of it again
+            if len(frames) > (1 if have is not None else 0):
+                save()
+                print("    saved the cells fetched so far before failing")
+            raise
         frames.append(f)
         print(f"    cell {clat:.2f},{clon:.2f}  {lo.date()}..{hi.date()}  "
               f"{len(f):,} hours", flush=True)
 
-    w = (pd.concat(frames, ignore_index=True)
-           .drop_duplicates(subset=["clat", "clon", "ts"], keep="last"))
-    w.to_parquet(WX)
-    return w
+    return save()
 
 
 def checklists():
