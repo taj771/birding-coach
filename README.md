@@ -18,7 +18,7 @@ Those two turn out to be the largest measurable effects in the data.
 
 ## What the data says
 
-3,867 complete checklists, 40 days, 953 sites, 67 species modelled.
+4,207 complete checklists, 48 days, 1,039 sites, 69 species modelled.
 
 | | |
 |---|---|
@@ -32,9 +32,10 @@ count — most birds are not singing at dawn. Generic *"go early"* advice
 underdelivers; species-specific timing is where the value is.
 
 The model is best at exactly the birds people want help with. Warblers, which
-are seasonal and detected by song, predict well (AUC 0.84–0.88). Year-round
-residents like Song Sparrow barely predict at all (AUC 0.60) — there is nothing
-to predict when a bird is everywhere all the time.
+are seasonal and detected by song, predict well — Nashville 0.95, Northern
+Parula 0.93, Tennessee 0.93. Year-round residents predict worst: Song Sparrow
+0.68, Chimney Swift 0.66. There is little to predict when a bird is everywhere
+all the time.
 
 ## How it works
 
@@ -49,12 +50,12 @@ recorded every species they could identify. That is what makes a probability
 computable at all: a species missing from a complete list is a real absence,
 not silence. Without it you have a tally of sightings and no denominator.
 
-Ridge rather than plain maximum likelihood so that every one of the 186
+Ridge rather than plain maximum likelihood so that every one of the 192
 hotspots can carry its own effect. A hotspot visited 89 times keeps its own
 estimate; one visited four times is pulled toward the county average. Shrinkage
 follows the evidence, which is what an arbitrary visit threshold was crudely
-approximating — and unpenalised fitting separated badly, losing 30 of 67
-species to infinite coefficients.
+approximating — and unpenalised fitting separated badly, losing roughly half
+the species to infinite coefficients once site effects were added.
 
 The cost is inference: ridge estimates are biased on purpose, so there are no
 valid p-values. Fine here, since the app needs point predictions. Claims about
@@ -63,8 +64,8 @@ whether an effect is *real* need the unpenalised fit, which is a separate job.
 ### Two evaluations, because there are two questions
 
 ```
-new site   AUC ~0.70, calibration MAE 0.047    somewhere never visited
-new day    AUC ~0.73, calibration MAE 0.033    a known hotspot, future date
+new site   AUC 0.72, calibration MAE 0.038    somewhere never visited
+new day    AUC 0.79, calibration MAE 0.030    a known hotspot, future date
 ```
 
 Held out by site and by date respectively. The second is what the app actually
@@ -109,6 +110,28 @@ already relies on when it re-reads overlapping days.
 Set `HF_DATASET` and `HF_TOKEN` (a **write** token) and it happens
 automatically. Leave them unset and the sync is skipped, so a local-only
 checkout still works.
+
+### Reproducibility
+
+The same data was fitted on a laptop and on a GitHub runner and the two
+coefficient sets compared term by term:
+
+```
+69 species, 17,526 terms, identical key sets
+max absolute difference   7.9e-08
+all terms agree within    1e-06
+held-out metrics differ by at most 1.1e-09
+```
+
+Across arm64 and x86_64. The residual is lbfgs stopping a hair earlier or
+later because a different BLAS sums the same numbers in a different order.
+
+That check only held because both machines happened to install the same
+library versions, so `requirements.txt` is pinned — including numpy and scipy,
+which nothing imports directly but which do the arithmetic. A changed solver
+default would otherwise move the published coefficients with nothing to
+compare against. To upgrade: bump the pins, refit, and diff against the
+previous run before publishing.
 
 Scraping targets dates about a week old. eBird submissions trail the outing —
 people enter a weekend trip on Monday — so scraping fresh gets only the
