@@ -412,19 +412,36 @@ tiles — free, no token, no sign-up.
 npm i leaflet react-leaflet
 ```
 
+Use the **greyscale CARTO Positron** tiles, not standard OpenStreetMap. Also
+free and keyless. Standard OSM renders parks green, and birding hotspots are
+overwhelmingly parks — a green-shaded pin sits invisibly on exactly the
+landcover it is most often placed on. A muted basemap makes the data the only
+saturated thing on screen.
+
 ```tsx
-import { MapContainer, TileLayer, Marker, Rectangle } from "react-leaflet";
+import { MapContainer, TileLayer, CircleMarker, Rectangle } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-// Attribution is required by the OpenStreetMap tile usage policy.
 <MapContainer center={[40.44, -79.99]} zoom={10}>
   <TileLayer
-    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+    subdomains="abcd"
+    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
   />
   ...
 </MapContainer>
 ```
+
+Attribution is required by both the OpenStreetMap and CARTO usage policies.
+
+**Pin colour ramp: pale magenta to deep purple**, `#fcd9f0` → `#b13a8e` →
+`#4a0c55`. Nothing in a street basemap occupies that hue — greens are
+landcover, blues are water, greys and yellows are roads — and it stays ordered
+in greyscale because lightness falls along it. Give each pin a white ring
+(`weight: 1.6`) so it lifts off whatever is underneath.
+
+Keep the teal accent for the interface. It is the map data specifically that
+must not be green.
 
 Two known Leaflet gotchas, both of which look like the map is broken:
 
@@ -437,7 +454,8 @@ Two known Leaflet gotchas, both of which look like the map is broken:
 
 ```tsx
 <Rectangle bounds={[[40.19, -80.34], [40.68, -79.69]]}
-           pathOptions={{ color: "#00897A", weight: 1, fillOpacity: 0.05 }} />
+           pathOptions={{ color: "#8a9a97", weight: 1, fill: false,
+                          dashArray: "5 5" }} />
 ```
 
 Those are the exact bounds `inCoverage()` tests. The real county boundary is an
