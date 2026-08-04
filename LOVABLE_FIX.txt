@@ -1,0 +1,401 @@
+Do not rebuild the app. Apply these changes to what already exists.
+
+The statistical model is now fitted, so the placeholder coefficients and the
+simplified scoring formula from the original spec are both wrong and must be
+replaced. Auth, the log form, "my logs", the hotspot list, the copy rules and
+the design are all correct — leave them alone.
+
+There are six changes. Do them in this order.
+
+---
+
+## 1. Schema: one new column, and reseed the species table
+
+```sql
+alter table checklists add column if not exists ebird_loc_id text;
+```
+
+Set it when the user's chosen point is within 200 m of a known eBird hotspot.
+It is what lets a logged outing be matched to a site the model knows.
+
+Then replace the species table contents. The picker currently offers species
+the model cannot forecast, which is a dead end for the user — every species
+listed must have coefficients.
+
+```sql
+delete from species;
+insert into species (species_code, common_name) values
+  ('acafly', 'Acadian Flycatcher'),
+  ('amecro', 'American Crow'),
+  ('amegfi', 'American Goldfinch'),
+  ('amered', 'American Redstart'),
+  ('amerob', 'American Robin'),
+  ('babwar', 'Bay-breasted Warbler'),
+  ('balori', 'Baltimore Oriole'),
+  ('barswa', 'Barn Swallow'),
+  ('bkbwar', 'Blackburnian Warbler'),
+  ('bkcchi', 'Black-capped Chickadee'),
+  ('blujay', 'Blue Jay'),
+  ('bnhcow', 'Brown-headed Cowbird'),
+  ('btnwar', 'Black-throated Green Warbler'),
+  ('buggna', 'Blue-gray Gnatcatcher'),
+  ('cangoo', 'Canada Goose'),
+  ('carchi', 'Carolina Chickadee'),
+  ('carwre', 'Carolina Wren'),
+  ('cedwax', 'Cedar Waxwing'),
+  ('chispa', 'Chipping Sparrow'),
+  ('chiswi', 'Chimney Swift'),
+  ('comgra', 'Common Grackle'),
+  ('comyel', 'Common Yellowthroat'),
+  ('dowwoo', 'Downy Woodpecker'),
+  ('easblu', 'Eastern Bluebird'),
+  ('easpho', 'Eastern Phoebe'),
+  ('eastow', 'Eastern Towhee'),
+  ('eawpew', 'Eastern Wood-Pewee'),
+  ('eawvir1', 'Eastern Warbling Vireo'),
+  ('eursta', 'European Starling'),
+  ('fiespa', 'Field Sparrow'),
+  ('grbher3', 'Great Blue Heron'),
+  ('grycat', 'Gray Catbird'),
+  ('haiwoo', 'Hairy Woodpecker'),
+  ('hoowar', 'Hooded Warbler'),
+  ('houfin', 'House Finch'),
+  ('houspa', 'House Sparrow'),
+  ('houwre', 'Northern House Wren'),
+  ('indbun', 'Indigo Bunting'),
+  ('killde', 'Killdeer'),
+  ('magwar', 'Magnolia Warbler'),
+  ('mallar3', 'Mallard'),
+  ('moudov', 'Mourning Dove'),
+  ('naswar', 'Nashville Warbler'),
+  ('norcar', 'Northern Cardinal'),
+  ('norfli', 'Northern Flicker'),
+  ('normoc', 'Northern Mockingbird'),
+  ('norpar', 'Northern Parula'),
+  ('nrwswa', 'Northern Rough-winged Swallow'),
+  ('orcori', 'Orchard Oriole'),
+  ('pilwoo', 'Pileated Woodpecker'),
+  ('rebwoo', 'Red-bellied Woodpecker'),
+  ('reevir1', 'Red-eyed Vireo'),
+  ('rethaw', 'Red-tailed Hawk'),
+  ('rewbla', 'Red-winged Blackbird'),
+  ('robgro', 'Rose-breasted Grosbeak'),
+  ('rocpig1', 'Rock Pigeon (Feral Pigeon)'),
+  ('rthhum', 'Ruby-throated Hummingbird'),
+  ('scatan', 'Scarlet Tanager'),
+  ('sonspa', 'Song Sparrow'),
+  ('tenwar', 'Tennessee Warbler'),
+  ('treswa', 'Tree Swallow'),
+  ('tuftit', 'Tufted Titmouse'),
+  ('turvul', 'Turkey Vulture'),
+  ('whbnut', 'White-breasted Nuthatch'),
+  ('whtspa', 'White-throated Sparrow'),
+  ('woothr', 'Wood Thrush'),
+  ('yelwar1', 'Northern Yellow Warbler'),
+  ('yerwar', 'Yellow-rumped Warbler'),
+  ('yesfli', 'Northern Flicker (Yellow-shafted)');
+```
+
+Also make sure `model_coefficients` has an index on `species_code`:
+
+```sql
+create index if not exists model_coefficients_species_idx
+  on model_coefficients (species_code);
+```
+
+I will load the 17,526 coefficient rows myself through the SQL editor.
+
+---
+
+## 2. Delete the placeholder coefficients
+
+The original spec gave hardcoded values (`intercept -0.40`, `hour_06 +0.55`,
+`log_duration +0.75` and so on) to make the UI testable before the model
+existed. Remove every trace of them. If a species has no rows in
+`model_coefficients`, show "model not loaded for this species" — never fall
+back to invented numbers.
+
+Note the term name changed: it is `log_dur`, not `log_duration`.
+
+---
+
+## 3. Replace the scoring code
+
+Create `src/lib/score.ts` with exactly this content, and delete whatever
+scoring logic currently exists. The old formula had five terms; the real model
+has twelve, including per-week and per-site effects that the old version had no
+concept of.
+
+Use these functions. Do not reimplement the arithmetic in the edge function.
+
+```ts
+type Coef = Record<string, number>;
+
+interface Outing {
+  durationHrs: number;
+  distanceKm: number;
+  observers: number;
+  traveling: boolean;
+}
+
+interface HourWeather {
+  windMax: number;      // max over the hours the outing spans
+  tempMean: number;
+  precipSum: number;
+  cloudMean: number;
+}
+
+/** Week index must match Python's `doy // 7`. */
+export function weekOf(d: Date): number {
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+  const doy = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(),
+                                   d.getUTCDate()) - start) / 86_400_000);
+  return Math.floor(doy / 7);
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * Why a cell cannot be scored, or null when it can.
+ *
+ * The week check is not defensive padding. Scraping covers 48 days spread
+ * across 18 months, so most calendar weeks have no fitted term at all. Reading
+ * a missing week as 0 does not mean "average week" — it silently removes
+ * seasonality from the sum, and seasonality is most of what the model knows
+ * about migrants. A Northern Parula would be scored in August using everything
+ * except the fact that it is August.
+ */
+export function unavailable(
+  c: Coef, date: Date, hour: number, minSupport = 50,
+): "hour" | "week" | null {
+  if ((c[`support_${pad(hour)}`] ?? 0) < minSupport) return "hour";
+  if (c[`week_${pad(weekOf(date))}`] === undefined) return "week";
+  return null;
+}
+
+/** Which weeks the model can speak to at all, for the UI to show up front. */
+export function modelledWeeks(c: Coef): number[] {
+  return Object.keys(c)
+    .filter(k => k.startsWith("week_"))
+    .map(k => Number(k.slice(5)))
+    .sort((a, b) => a - b);
+}
+
+/**
+ * One cell of the grid. Returns null when the model cannot back a number —
+ * too little data for that hour, or no fitted term for that week. The UI greys
+ * those; see `unavailable` for which of the two it was.
+ */
+export function score(
+  c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
+  locId?: string, minSupport = 50,
+): number | null {
+  if (unavailable(c, date, hour, minSupport)) return null;
+
+  // a known hotspot uses its own effect; anywhere else falls back to the
+  // pooled baseline, and the UI should say the number is county-wide
+  const site = (locId && c[`site_${locId}`] !== undefined)
+    ? c[`site_${locId}`]
+    : (c.site_PERSONAL ?? 0);
+
+  const logit =
+    (c.intercept ?? 0) +
+    (c[`hour_${pad(hour)}`] ?? 0) +
+    (c[`week_${pad(weekOf(date))}`] ?? 0) +
+    site +
+    (c.log_dur ?? 0) * Math.log(o.durationHrs) +
+    (c.log_dist ?? 0) * Math.log1p(o.distanceKm) +
+    (c.n_observers ?? 0) * o.observers +
+    (c.traveling ?? 0) * (o.traveling ? 1 : 0) +
+    (c.wind_max ?? 0) * w.windMax +
+    (c.temp_mean ?? 0) * w.tempMean +
+    (c.precip_sum ?? 0) * w.precipSum +
+    (c.cloud_mean ?? 0) * w.cloudMean;
+
+  return 1 / (1 + Math.exp(-logit));   // the only real maths in the file
+}
+
+/**
+ * What each choice was worth, in percentage points, against a reference
+ * outing (10:00, 30 minutes, median wind). Computed by re-scoring with one
+ * term reset, NOT by reading coefficients — those are log-odds and would not
+ * sum to the number on screen.
+ */
+export function drivers(
+  c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
+  locId?: string,
+) {
+  // minSupport 0 here on purpose: the caller has already decided this cell
+  // is worth showing, and the breakdown must not disagree with the number
+  const at = (h: number, out: Outing, wx: HourWeather) =>
+    score(c, date, h, out, wx, locId, 0)!;
+  const actual = at(hour, o, w);
+
+  const refHour = 10, refDur = 0.5, refWind = 12;
+  const base = at(refHour, { ...o, durationHrs: refDur },
+                  { ...w, windMax: refWind });
+
+  return [
+    { label: "time of day", pts: at(hour, { ...o, durationHrs: refDur },
+                                    { ...w, windMax: refWind }) - base },
+    { label: "how long",    pts: at(refHour, o,
+                                    { ...w, windMax: refWind }) - base },
+    { label: "weather",     pts: at(refHour, { ...o, durationHrs: refDur },
+                                    w) - base },
+  ].map(d => ({ ...d, pts: Math.round(d.pts * 100) }))
+   .concat([{ label: "total", pts: Math.round(actual * 100) }]);
+}
+
+/** The full grid: 7 days x the hours the model covers. */
+export function grid(
+  c: Coef, forecast: { time: string; wind: number; temp: number;
+                       precip: number; cloud: number }[],
+  o: Outing, locId?: string,
+  hours = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+) {
+  const byKey = new Map(forecast.map(f => [f.time.slice(0, 13), f]));
+  const days = [...new Set(forecast.map(f => f.time.slice(0, 10)))].slice(0, 7);
+
+  return days.flatMap(day =>
+    hours.map(h => {
+      // the outing spans several hours; wind is the MAX over them, because a
+      // gust that masks birdsong matters more than the average
+      const span = Array.from({ length: Math.max(1, Math.ceil(o.durationHrs)) },
+                              (_, i) => byKey.get(`${day}T${pad(h + i)}`))
+                        .filter(Boolean) as typeof forecast;
+      if (!span.length) {
+        return { day, hour: h, probability: null, reason: "forecast" as const };
+      }
+
+      const w: HourWeather = {
+        windMax: Math.max(...span.map(s => s.wind)),
+        tempMean: span.reduce((a, s) => a + s.temp, 0) / span.length,
+        precipSum: span.reduce((a, s) => a + s.precip, 0),
+        cloudMean: span.reduce((a, s) => a + s.cloud, 0) / span.length,
+      };
+      const date = new Date(day);
+      return { day, hour: h,
+               probability: score(c, date, h, o, w, locId),
+               reason: unavailable(c, date, h) };
+    }));
+}
+
+/** True when the model knows this specific place, rather than falling back
+ *  to the county baseline. The UI should mark the difference — a pin on an
+ *  unmodelled spot is an Allegheny-wide estimate, not a local one. */
+export function hasSiteEffect(c: Coef, locId: string): boolean {
+  return c[`site_${locId}`] !== undefined;
+}
+
+/** Bounding box of the sites the model was fitted on: Allegheny County, PA,
+ *  about 53 km across either way. */
+export const EXTENT = { latMin: 40.19, latMax: 40.68,
+                        lonMin: -80.34, lonMax: -79.69 };
+
+/**
+ * Whether a point is somewhere this model can speak about at all.
+ *
+ * Nothing in `score` knows where it is. A pin in Philadelphia matches none of
+ * the 192 hotspot terms, falls back to the pooled `site_PERSONAL` baseline,
+ * and returns a confident number built entirely from Allegheny County's
+ * intercept, hours and weeks. The failure is invisible unless it is checked
+ * here, so check it before scoring rather than trusting the caller.
+ */
+export function inCoverage(lat: number, lon: number): boolean {
+  return lat >= EXTENT.latMin && lat <= EXTENT.latMax
+      && lon >= EXTENT.lonMin && lon <= EXTENT.lonMax;
+}
+```
+
+---
+
+## 4. The forecast edge function calls `grid()`
+
+```
+POST { species_code, latitude, longitude, duration_min, ebird_loc_id? }
+→ { grid: [{ day, hour, probability, reason }], best, drivers, modelledWeeks,
+    inCoverage }
+```
+
+1. If `inCoverage(latitude, longitude)` is false, return immediately with
+   `inCoverage: false` and no grid.
+2. Fetch the 7-day hourly forecast from Open-Meteo (no key needed):
+   `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation,wind_speed_10m,cloud_cover&forecast_days=7&timezone=auto`
+3. Load that species' rows from `model_coefficients` into a flat
+   `Record<string, number>` keyed on `term`.
+4. Call `grid()`. Return what it gives you.
+
+---
+
+## 5. The forecast screen must show what the model cannot answer
+
+This is the substantive change, and the part most likely to be skipped. The
+model has real gaps, and the previous version had no way to express them — it
+would have shown a confident number in every cell regardless.
+
+**Out of area.** When `inCoverage` is false, replace the entire forecast with a
+panel. No grid, greyed or otherwise:
+
+```
+Birding Coach currently covers Allegheny County, Pennsylvania.
+We have no data for this location, so there is nothing to forecast.
+
+You can still log sightings here — they count toward your list.
+```
+
+Draw the county outline on the map and default the map to Pittsburgh rather
+than browser geolocation, so a user elsewhere does not land on an error.
+
+The bounds are in `EXTENT`: latitude 40.19 to 40.68, longitude −80.34 to
+−79.69. This matters because nothing in `score()` knows where it is — a point
+in Philadelphia matches none of the 192 hotspot terms, silently falls back to
+the pooled baseline, and returns a confident number assembled entirely from
+Pittsburgh's data. The user has no way to tell that apart from a real answer.
+
+**Coverage strip.** Directly under the controls, always visible:
+
+```
+This model covers 15 weeks of the year — mostly late April to early June,
+plus scattered weeks elsewhere. Dates outside them are shown greyed.
+```
+
+Render it as a slim 52-cell year bar with the fitted weeks filled and the
+current week marked. `modelledWeeks()` returns which ones. The gap should be
+visible at a glance, not buried in a sentence.
+
+**Grid rows are hours 06:00 to 20:00.** Fifteen rows, not 05:00–21:00. Outside
+those hours there are too few checklists to estimate anything.
+
+**Null cells render greyed, never as 0%.** The tooltip depends on `reason`:
+
+```
+"hour"      too few checklists at this hour to estimate
+"week"      no data for this week of the year
+"forecast"  beyond the weather forecast
+```
+
+If every cell is null because the whole week is unmodelled, replace the grid
+with an explanatory panel rather than a wall of grey, and name the nearest
+weeks the model does cover.
+
+**Hotspots without their own effect** get labelled. `hasSiteEffect(coef, locId)`
+is false for any location outside the 192 modelled hotspots; those show a
+county-wide estimate, and the list should say so rather than presenting it as a
+local number.
+
+---
+
+## 6. Driver breakdown comes from `drivers()`
+
+If the current version computes the "why" list by reading coefficients, replace
+it. Coefficients are log-odds; they do not add up to the percentage on screen.
+`drivers()` re-scores counterfactually against a reference outing (10:00, 30
+minutes, median wind) so the numbers shown actually reconcile with the total.
+
+---
+
+## What must not change
+
+Auth, the log form and its required effort fields, "my logs", the eBird hotspot
+proxy and its caching, the copy rules about detection probability, and the
+visual design. Those were right and nothing about the model changes them.
