@@ -44,14 +44,41 @@ export function weekOf(d: Date): number {
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /**
- * One cell of the grid. Returns null when the model has too little data for
- * that hour — the UI greys those rather than printing a number it can't back.
+ * Why a cell cannot be scored, or null when it can.
+ *
+ * The week check is not defensive padding. Scraping covers 48 days spread
+ * across 18 months, so most calendar weeks have no fitted term at all. Reading
+ * a missing week as 0 does not mean "average week" — it silently removes
+ * seasonality from the sum, and seasonality is most of what the model knows
+ * about migrants. A Northern Parula would be scored in August using everything
+ * except the fact that it is August.
+ */
+export function unavailable(
+  c: Coef, date: Date, hour: number, minSupport = 50,
+): "hour" | "week" | null {
+  if ((c[`support_${pad(hour)}`] ?? 0) < minSupport) return "hour";
+  if (c[`week_${pad(weekOf(date))}`] === undefined) return "week";
+  return null;
+}
+
+/** Which weeks the model can speak to at all, for the UI to show up front. */
+export function modelledWeeks(c: Coef): number[] {
+  return Object.keys(c)
+    .filter(k => k.startsWith("week_"))
+    .map(k => Number(k.slice(5)))
+    .sort((a, b) => a - b);
+}
+
+/**
+ * One cell of the grid. Returns null when the model cannot back a number —
+ * too little data for that hour, or no fitted term for that week. The UI greys
+ * those; see `unavailable` for which of the two it was.
  */
 export function score(
   c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
   locId?: string, minSupport = 50,
 ): number | null {
-  if ((c[`support_${pad(hour)}`] ?? 0) < minSupport) return null;
+  if (unavailable(c, date, hour, minSupport)) return null;
 
   // a known hotspot uses its own effect; anywhere else falls back to the
   // pooled baseline, and the UI should say the number is county-wide
@@ -124,7 +151,9 @@ export function grid(
       const span = Array.from({ length: Math.max(1, Math.ceil(o.durationHrs)) },
                               (_, i) => byKey.get(`${day}T${pad(h + i)}`))
                         .filter(Boolean) as typeof forecast;
-      if (!span.length) return { day, hour: h, probability: null };
+      if (!span.length) {
+        return { day, hour: h, probability: null, reason: "forecast" as const };
+      }
 
       const w: HourWeather = {
         windMax: Math.max(...span.map(s => s.wind)),
@@ -132,8 +161,10 @@ export function grid(
         precipSum: span.reduce((a, s) => a + s.precip, 0),
         cloudMean: span.reduce((a, s) => a + s.cloud, 0) / span.length,
       };
+      const date = new Date(day);
       return { day, hour: h,
-               probability: score(c, new Date(day), h, o, w, locId) };
+               probability: score(c, date, h, o, w, locId),
+               reason: unavailable(c, date, h) };
     }));
 }
 
