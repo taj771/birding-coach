@@ -60,7 +60,7 @@ TEMPLATE = """<!doctype html>
   .legend { display:flex; align-items:center; gap:6px; font-size:11px;
             color:var(--muted); margin-top:10px; }
   .ramp { flex:1; height:9px; border-radius:5px;
-          background:linear-gradient(90deg,#e8f2f0,#00897A,#00443d); }
+          background:linear-gradient(90deg,#fcd9f0,#b13a8e,#4a0c55); }
 </style>
 
 <div id="panel">
@@ -156,14 +156,18 @@ function score(c, date, hour, o, w, locId) {
 
 const map = L.map("map").fitBounds([[EXTENT.latMin, EXTENT.lonMin],
                                     [EXTENT.latMax, EXTENT.lonMax]]);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  maxZoom: 18,
+// A muted grey basemap, not standard OSM. Birding hotspots are overwhelmingly
+// parks, and OSM renders parks green — so a green-ramped pin sits invisibly on
+// exactly the landcover it is most often placed on. Positron is greyscale, so
+// the data layer is the only saturated thing on screen.
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>',
+  subdomains: "abcd", maxZoom: 19,
 }).addTo(map);
 
 // the rectangle inCoverage() actually tests, not the county's true outline
 L.rectangle([[EXTENT.latMin, EXTENT.lonMin], [EXTENT.latMax, EXTENT.lonMax]],
-            { color:"#00897A", weight:1, fillOpacity:0.03, dashArray:"4 4" })
+            { color:"#8a9a97", weight:1, fill:false, dashArray:"5 5" })
  .addTo(map);
 
 const layer = L.layerGroup().addTo(map);
@@ -198,8 +202,12 @@ hrSel.value = 8;
 const dateEl = document.getElementById("date");
 dateEl.value = "2026-05-14";       // a week the model covers
 
-function ramp(t) {                  // single hue, light -> dark
-  const a = [232,242,240], b = [0,68,61];
+// Magenta through to deep purple. Chosen because nothing in a street basemap
+// occupies that hue — greens are landcover, blues are water, greys and yellows
+// are roads. It also stays ordered when printed greyscale, since lightness
+// falls monotonically along it.
+function ramp(t) {
+  const a = [252, 217, 240], b = [74, 12, 85];
   return `rgb(${a.map((v,i) => Math.round(v + (b[i]-v)*t)).join(",")})`;
 }
 
@@ -264,9 +272,10 @@ function draw() {
 
   scored.forEach(h => {
     const t = hi === lo ? 0.5 : (h.p - lo) / (hi - lo);
+    // a white ring lifts the pin off whatever landcover sits under it
     L.circleMarker([h.latitude, h.longitude], {
       radius: 4 + 7*t, fillColor: ramp(t), color:"#fff",
-      weight: 1, fillOpacity: 0.9,
+      weight: 1.6, fillOpacity: 0.95, opacity: 0.95,
     }).bindTooltip(
       `<b>${h.name}</b><br>${(h.p*100).toFixed(1)}%<br>
        <span style="color:#6b7b78">${h.n_checklists} checklists in training data</span>`,
