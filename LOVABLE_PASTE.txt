@@ -1,13 +1,20 @@
 Build a web app called **Birding Coach**. Birders log what they see, and the app
-tells them which hours in the next 7 days give them the best chance of seeing a
-chosen species.
+tells them which hours in the next 7 days give the best chance of seeing a chosen
+species, at which nearby hotspot.
 
 Stack: React + Supabase (auth, Postgres, edge functions). Mobile-first, works on
 desktop.
 
+The statistical model is already fitted. It ships as a lookup table of
+coefficients, so nothing here needs a machine-learning runtime — the scoring is
+a sum and a logistic transform, given below as finished TypeScript. Do not
+reimplement it or "improve" the formula.
+
 ## Database schema
 
-Create these tables with row-level security so users only read/write their own rows.
+Row-level security so users only read and write their own rows. The two
+reference tables (`species`, `model_coefficients`) are world-readable and
+written only by the offline pipeline.
 
 ```sql
 -- one row per birding outing, mirroring eBird's structure
@@ -19,6 +26,7 @@ create table checklists (
   latitude      double precision not null,
   longitude     double precision not null,
   site_name     text,
+  ebird_loc_id  text,          -- set when the user picked a known hotspot
   protocol      text not null check (protocol in ('stationary','traveling','incidental')),
   duration_min  integer check (duration_min between 1 and 720),
   distance_km   numeric(6,2),
@@ -28,7 +36,6 @@ create table checklists (
   created_at    timestamptz not null default now()
 );
 
--- one row per species seen on a checklist
 create table observations (
   id            uuid primary key default gen_random_uuid(),
   checklist_id  uuid not null references checklists(id) on delete cascade,
@@ -37,133 +44,411 @@ create table observations (
   unique (checklist_id, species_code)
 );
 
--- reference list for the species picker
 create table species (
-  species_code  text primary key,
-  common_name   text not null,
+  species_code    text primary key,
+  common_name     text not null,
   scientific_name text
 );
 
--- the fitted model, uploaded from an offline pipeline
+-- the fitted model: one row per (species, term)
 create table model_coefficients (
   species_code  text not null,
-  term          text not null,     -- 'intercept' | 'hour_06' | 'log_duration' | 'wind_max' | ...
+  term          text not null,
   value         double precision not null,
   fitted_at     timestamptz not null default now(),
   primary key (species_code, term)
 );
+create index on model_coefficients (species_code);
 ```
 
-Seed `species` with ~40 common North American birds (American Robin `amerob`,
-Northern Cardinal `norcar`, Blue Jay `blujay`, Song Sparrow `sonspa`, Tufted
-Titmouse `tuftit`, Mourning Dove `moudov`, American Goldfinch `amegfi`,
-Red-bellied Woodpecker `rebwoo`, Carolina Wren `carwre`, American Crow `amecro`,
-and similar).
+**Loading the coefficients.** There are 17,526 rows — far too many to paste into
+chat. I will load `data/model_coefficients.sql` (694 KB) through the SQL editor
+myself. Build against an empty `model_coefficients` table and make the UI degrade
+honestly when a species has no rows: "model not loaded for this species".
+
+## Seed the species table
+
+These are exactly the 69 species the model was fitted on. Do not add others — a
+species with no coefficients cannot be forecast, and offering it in the picker
+is a dead end.
+
+```sql
+insert into species (species_code, common_name) values
+  ('acafly', 'Acadian Flycatcher'),
+  ('amecro', 'American Crow'),
+  ('amegfi', 'American Goldfinch'),
+  ('amered', 'American Redstart'),
+  ('amerob', 'American Robin'),
+  ('babwar', 'Bay-breasted Warbler'),
+  ('balori', 'Baltimore Oriole'),
+  ('barswa', 'Barn Swallow'),
+  ('bkbwar', 'Blackburnian Warbler'),
+  ('bkcchi', 'Black-capped Chickadee'),
+  ('blujay', 'Blue Jay'),
+  ('bnhcow', 'Brown-headed Cowbird'),
+  ('btnwar', 'Black-throated Green Warbler'),
+  ('buggna', 'Blue-gray Gnatcatcher'),
+  ('cangoo', 'Canada Goose'),
+  ('carchi', 'Carolina Chickadee'),
+  ('carwre', 'Carolina Wren'),
+  ('cedwax', 'Cedar Waxwing'),
+  ('chispa', 'Chipping Sparrow'),
+  ('chiswi', 'Chimney Swift'),
+  ('comgra', 'Common Grackle'),
+  ('comyel', 'Common Yellowthroat'),
+  ('dowwoo', 'Downy Woodpecker'),
+  ('easblu', 'Eastern Bluebird'),
+  ('easpho', 'Eastern Phoebe'),
+  ('eastow', 'Eastern Towhee'),
+  ('eawpew', 'Eastern Wood-Pewee'),
+  ('eawvir1', 'Eastern Warbling Vireo'),
+  ('eursta', 'European Starling'),
+  ('fiespa', 'Field Sparrow'),
+  ('grbher3', 'Great Blue Heron'),
+  ('grycat', 'Gray Catbird'),
+  ('haiwoo', 'Hairy Woodpecker'),
+  ('hoowar', 'Hooded Warbler'),
+  ('houfin', 'House Finch'),
+  ('houspa', 'House Sparrow'),
+  ('houwre', 'Northern House Wren'),
+  ('indbun', 'Indigo Bunting'),
+  ('killde', 'Killdeer'),
+  ('magwar', 'Magnolia Warbler'),
+  ('mallar3', 'Mallard'),
+  ('moudov', 'Mourning Dove'),
+  ('naswar', 'Nashville Warbler'),
+  ('norcar', 'Northern Cardinal'),
+  ('norfli', 'Northern Flicker'),
+  ('normoc', 'Northern Mockingbird'),
+  ('norpar', 'Northern Parula'),
+  ('nrwswa', 'Northern Rough-winged Swallow'),
+  ('orcori', 'Orchard Oriole'),
+  ('pilwoo', 'Pileated Woodpecker'),
+  ('rebwoo', 'Red-bellied Woodpecker'),
+  ('reevir1', 'Red-eyed Vireo'),
+  ('rethaw', 'Red-tailed Hawk'),
+  ('rewbla', 'Red-winged Blackbird'),
+  ('robgro', 'Rose-breasted Grosbeak'),
+  ('rocpig1', 'Rock Pigeon (Feral Pigeon)'),
+  ('rthhum', 'Ruby-throated Hummingbird'),
+  ('scatan', 'Scarlet Tanager'),
+  ('sonspa', 'Song Sparrow'),
+  ('tenwar', 'Tennessee Warbler'),
+  ('treswa', 'Tree Swallow'),
+  ('tuftit', 'Tufted Titmouse'),
+  ('turvul', 'Turkey Vulture'),
+  ('whbnut', 'White-breasted Nuthatch'),
+  ('whtspa', 'White-throated Sparrow'),
+  ('woothr', 'Wood Thrush'),
+  ('yelwar1', 'Northern Yellow Warbler'),
+  ('yerwar', 'Yellow-rumped Warbler'),
+  ('yesfli', 'Northern Flicker (Yellow-shafted)');
+```
+
+## The scoring function — use this file verbatim
+
+Create `src/lib/score.ts` with exactly this content. Every term name matches the
+`model_coefficients` table. The two things that most need respecting are the
+`unavailable()` checks: the model genuinely cannot answer for some hours and
+most calendar weeks, and returning a plausible number anyway is worse than
+returning nothing.
+
+```ts
+type Coef = Record<string, number>;
+
+interface Outing {
+  durationHrs: number;
+  distanceKm: number;
+  observers: number;
+  traveling: boolean;
+}
+
+interface HourWeather {
+  windMax: number;      // max over the hours the outing spans
+  tempMean: number;
+  precipSum: number;
+  cloudMean: number;
+}
+
+/** Week index must match the pipeline's `dayOfYear // 7`. */
+export function weekOf(d: Date): number {
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+  const doy = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(),
+                                   d.getUTCDate()) - start) / 86_400_000);
+  return Math.floor(doy / 7);
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * Why a cell cannot be scored, or null when it can.
+ *
+ * The week check is not defensive padding. Scraping covers 48 days spread
+ * across 18 months, so most calendar weeks have no fitted term at all. Reading
+ * a missing week as 0 does not mean "average week" — it silently removes
+ * seasonality from the sum, and seasonality is most of what the model knows
+ * about migrants. A Northern Parula would be scored in August using everything
+ * except the fact that it is August.
+ */
+export function unavailable(
+  c: Coef, date: Date, hour: number, minSupport = 50,
+): "hour" | "week" | null {
+  if ((c[`support_${pad(hour)}`] ?? 0) < minSupport) return "hour";
+  if (c[`week_${pad(weekOf(date))}`] === undefined) return "week";
+  return null;
+}
+
+/** Which weeks the model can speak to at all, for the UI to show up front. */
+export function modelledWeeks(c: Coef): number[] {
+  return Object.keys(c)
+    .filter(k => k.startsWith("week_"))
+    .map(k => Number(k.slice(5)))
+    .sort((a, b) => a - b);
+}
+
+export function score(
+  c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
+  locId?: string, minSupport = 50,
+): number | null {
+  if (unavailable(c, date, hour, minSupport)) return null;
+
+  // a known hotspot uses its own effect; anywhere else falls back to the
+  // pooled baseline, and the UI should say the number is county-wide
+  const site = (locId && c[`site_${locId}`] !== undefined)
+    ? c[`site_${locId}`]
+    : (c.site_PERSONAL ?? 0);
+
+  const logit =
+    (c.intercept ?? 0) +
+    (c[`hour_${pad(hour)}`] ?? 0) +
+    (c[`week_${pad(weekOf(date))}`] ?? 0) +
+    site +
+    (c.log_dur ?? 0) * Math.log(o.durationHrs) +
+    (c.log_dist ?? 0) * Math.log1p(o.distanceKm) +
+    (c.n_observers ?? 0) * o.observers +
+    (c.traveling ?? 0) * (o.traveling ? 1 : 0) +
+    (c.wind_max ?? 0) * w.windMax +
+    (c.temp_mean ?? 0) * w.tempMean +
+    (c.precip_sum ?? 0) * w.precipSum +
+    (c.cloud_mean ?? 0) * w.cloudMean;
+
+  return 1 / (1 + Math.exp(-logit));
+}
+
+/**
+ * What each choice was worth, in percentage points, against a reference
+ * outing (10:00, 30 minutes, median wind). Computed by re-scoring with one
+ * term reset, NOT by reading coefficients — those are log-odds and would not
+ * sum to the number on screen.
+ */
+export function drivers(
+  c: Coef, date: Date, hour: number, o: Outing, w: HourWeather,
+  locId?: string,
+) {
+  const at = (h: number, out: Outing, wx: HourWeather) =>
+    score(c, date, h, out, wx, locId, 0)!;
+  const actual = at(hour, o, w);
+
+  const refHour = 10, refDur = 0.5, refWind = 12;
+  const base = at(refHour, { ...o, durationHrs: refDur },
+                  { ...w, windMax: refWind });
+
+  return [
+    { label: "time of day", pts: at(hour, { ...o, durationHrs: refDur },
+                                    { ...w, windMax: refWind }) - base },
+    { label: "how long",    pts: at(refHour, o,
+                                    { ...w, windMax: refWind }) - base },
+    { label: "weather",     pts: at(refHour, { ...o, durationHrs: refDur },
+                                    w) - base },
+  ].map(d => ({ ...d, pts: Math.round(d.pts * 100) }))
+   .concat([{ label: "total", pts: Math.round(actual * 100) }]);
+}
+
+/** The full grid: 7 days x the hours the model covers. */
+export function grid(
+  c: Coef, forecast: { time: string; wind: number; temp: number;
+                       precip: number; cloud: number }[],
+  o: Outing, locId?: string,
+  hours = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+) {
+  const byKey = new Map(forecast.map(f => [f.time.slice(0, 13), f]));
+  const days = [...new Set(forecast.map(f => f.time.slice(0, 10)))].slice(0, 7);
+
+  return days.flatMap(day =>
+    hours.map(h => {
+      // the outing spans several hours; wind is the MAX over them, because a
+      // gust that masks birdsong matters more than the average
+      const span = Array.from({ length: Math.max(1, Math.ceil(o.durationHrs)) },
+                              (_, i) => byKey.get(`${day}T${pad(h + i)}`))
+                        .filter(Boolean) as typeof forecast;
+      if (!span.length) {
+        return { day, hour: h, probability: null, reason: "forecast" as const };
+      }
+
+      const w: HourWeather = {
+        windMax: Math.max(...span.map(s => s.wind)),
+        tempMean: span.reduce((a, s) => a + s.temp, 0) / span.length,
+        precipSum: span.reduce((a, s) => a + s.precip, 0),
+        cloudMean: span.reduce((a, s) => a + s.cloud, 0) / span.length,
+      };
+      const date = new Date(day);
+      return { day, hour: h,
+               probability: score(c, date, h, o, w, locId),
+               reason: unavailable(c, date, h) };
+    }));
+}
+
+/** True when the model knows this specific place, rather than falling back
+ *  to the county baseline. */
+export function hasSiteEffect(c: Coef, locId: string): boolean {
+  return c[`site_${locId}`] !== undefined;
+}
+```
+
+## What the model can and cannot answer
+
+This is the part most likely to be got wrong, so it is spelled out.
+
+**Hours.** Only 06:00–20:00 are modelled. Outside that, birders submit too few
+checklists to estimate anything. The grid has 15 rows, not 24.
+
+**Weeks.** Coverage is partial and will stay that way until more of the calendar
+is scraped. `modelledWeeks()` returns the fitted ones — currently 15 of 52,
+clustered in spring migration. Any date in an unfitted week returns `null`, and
+the UI must say so rather than show a number.
+
+**Sites.** 192 eBird hotspots have their own effect. Anywhere else uses a pooled
+county baseline, which is a weaker answer. Use `hasSiteEffect()` and label the
+difference.
 
 ## Screens
 
 ### 1. Auth
-Email + password sign-up and sign-in via Supabase. Nothing custom.
+Email + password via Supabase. Nothing custom.
 
 ### 2. Log a sighting
 
 Fields, **in this order**:
 
 ```
-Where          map picker (default to browser geolocation), plus a text
-               field for a site name. Never ask the user to type coordinates.
+Where          map picker (default to browser geolocation), plus a text field
+               for a site name. Never ask the user to type coordinates. If the
+               point is within 200 m of a known eBird hotspot, offer to attach
+               it and store ebird_loc_id.
 Date           date picker, defaults to today
 Start time     time picker
 How            radio: Stationary / Traveling / Incidental
 Duration       number input, minutes         (hide if Incidental)
 Distance       number input, km              (show only if Traveling)
 Party size     number input, default 1
-Species        searchable multi-select from `species`, with an optional
-               count per species
+Species        searchable multi-select from `species`, optional count each
 Complete list  checkbox: "I'm reporting every species I could identify"
-               with helper text: "This is what makes your log usable for
-               predictions — it tells us what wasn't there, not just what was."
+               helper: "This is what makes your log usable for predictions —
+               it tells us what wasn't there, not just what was."
 ```
 
-The effort fields (duration, distance, party size) and the complete-list
-checkbox are **required for non-incidental checklists**. They look like friction
-but they are the reason the data is modellable — do not make them optional or
-hide them behind an "advanced" toggle.
+The effort fields and the complete-list checkbox are **required for
+non-incidental checklists**. They look like friction but they are the reason the
+data is modellable. Do not make them optional or bury them behind an "advanced"
+toggle.
 
 ### 3. My logs
 
-Table sorted newest first: date, site name, duration, number of species. Click a
-row to expand the species list. Small map showing the user's sites as pins.
-Summary strip: total checklists, total hours, distinct species.
+Table sorted newest first: date, site name, duration, species count. Click a row
+to expand the species list. Small map of the user's sites as pins. Summary
+strip: total checklists, total hours, distinct species.
 
-### 4. Forecast — this is the main screen
+### 4. Forecast — the main screen
 
-Controls in a single row at the top:
+Controls in one row:
+
 ```
-Species   dropdown, searchable, from `species`
+Species   searchable dropdown from `species`
 Where     map picker or "use my location", plus recent sites
-Duration  dropdown: 15 min / 30 min / 1 hour / 2 hours / 3 hours
+Duration  15 min / 30 min / 1 hour / 2 hours / 3 hours
 ```
 
-Below the controls, a **nearby hotspots** list — the eBird hotspots within 25 km
-of the chosen point, each showing its name, distance, and this species' best
-probability across the coming week. Sorted by that probability, highest first,
-not by distance. Selecting a hotspot re-runs the grid for its coordinates.
+**Coverage strip**, directly under the controls and always visible. The model
+cannot answer for most of the year and the user must know that before reading
+anything below it:
 
-Get hotspots from `https://api.ebird.org/v2/ref/hotspot/geo?lat=&lng=&dist=25&fmt=json`
-in a server function (needs the eBird key). Cache 24 hours — hotspots barely
-change. Score at most the 10 nearest so the page stays fast.
+```
+This model covers 15 weeks of the year — mostly late April to early June,
+plus scattered weeks elsewhere. Dates outside them are shown greyed.
+```
 
-Below, a heatmap grid:
-- rows = hours 05:00 through 21:00
+Render it as a slim 52-cell year bar with the fitted weeks filled and the
+current week marked, so the gap is visible at a glance rather than buried in
+prose.
+
+**Nearby hotspots list.** eBird hotspots within 25 km of the chosen point, each
+showing name, distance, and this species' best probability across the coming
+week. Sorted by probability, highest first — not by distance. Selecting one
+re-runs the grid for its coordinates and its `locId`. Mark any hotspot without
+its own site effect as "county-wide estimate".
+
+Get hotspots from
+`https://api.ebird.org/v2/ref/hotspot/geo?lat=&lng=&dist=25&fmt=json` in a
+server function (needs the eBird key). Cache 24 hours — hotspots barely change.
+Score at most the 10 nearest so the page stays fast.
+
+**Heatmap grid.**
+
+- rows = hours 06:00 through 20:00 (15 rows)
 - columns = the next 7 days
 - each cell shows a percentage
-- colour intensity scales with probability; use a single-hue sequential ramp,
-  light for low and dark for high — not a rainbow, not red-to-green
+- single-hue sequential ramp, light for low, dark for high. Not a rainbow, not
+  red-to-green
+- `probability === null` renders greyed, never as 0%. Tooltip depends on
+  `reason`:
+  - `"hour"` — "too few checklists at this hour to estimate"
+  - `"week"` — "no data for this week of the year"
+  - `"forecast"` — "beyond the weather forecast"
 
-Under the grid, a summary line:
+If **every** cell is null because the whole week is unmodelled, replace the grid
+with an explanatory panel rather than a wall of grey. Name the nearest weeks the
+model does cover.
+
+Under the grid, when there is anything to show:
+
 ```
 Best window: Thursday 07:00–08:00 — 74%
 ```
 
-And a short "why" list showing the contribution of each factor, e.g.
+And the driver breakdown from `drivers()`:
+
 ```
 dawn start        +18 points
 2 hours not 30    +11 points
 low wind Thursday  +3 points
 ```
 
-Cells where the model has little data must render greyed with a tooltip
-"not enough data for this hour" rather than showing a number.
+These come from the function, which re-scores counterfactually. Do not compute
+them by reading coefficients — those are log-odds and will not add up to the
+number on screen.
+
+### 5. How this works
+
+Short page. The model is fitted on complete eBird checklists from Allegheny
+County, Pennsylvania. It predicts whether someone like you, birding the way you
+plan to, historically **reported** the species. Time of day and how long you
+bird matter far more than weather. Held out on unseen days at known hotspots it
+reaches AUC 0.79 with a calibration error of 3 percentage points; at locations
+it has never seen, 0.72.
 
 ## Edge functions
 
 ### `forecast`
 ```
-POST { species_code, latitude, longitude, duration_min }
-→ { grid: [{ date, hour, probability, sufficient_data }], best, drivers }
+POST { species_code, latitude, longitude, duration_min, ebird_loc_id? }
+→ { grid: [{ day, hour, probability, reason }], best, drivers, modelledWeeks }
 ```
 
-Steps:
-1. Fetch the 7-day hourly forecast from Open-Meteo (no API key needed):
+1. Fetch the 7-day hourly forecast from Open-Meteo (no key):
    `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation,wind_speed_10m,cloud_cover&forecast_days=7&timezone=auto`
-2. Load that species' rows from `model_coefficients`.
-3. For each day × hour, sum: `intercept + hour_{HH} + log_duration*ln(hours) + wind_max*wind + temp_mean*temp`
-4. `probability = 1 / (1 + exp(-sum))`
-5. Return the grid.
-
-**Until real coefficients are uploaded, use these placeholder values** so the UI
-is fully testable. They are shaped like the real thing, not random:
-```
-intercept     -0.40
-hour_05 -0.30   hour_06 +0.55   hour_07 +0.60   hour_08 +0.50
-hour_09 +0.20   hour_10  0.00   hour_11 -0.05   hour_12 -0.30
-hour_13 -0.28   hour_14 -0.32   hour_15 -0.25   hour_16 -0.30
-hour_17 -0.32   hour_18 -0.12   hour_19 -0.38   hour_20 -0.85
-log_duration  +0.75
-wind_max      -0.02
-temp_mean     +0.01
-```
+2. Load that species' rows from `model_coefficients` into a flat
+   `Record<string, number>` keyed by `term`.
+3. Call `grid()` from `score.ts`. Do not reimplement the sum.
 
 ### `nearby`
 ```
@@ -171,17 +456,16 @@ GET ?latitude=&longitude=&dist=25&back=14
 → recent species seen nearby
 ```
 Proxy `https://api.ebird.org/v2/data/obs/geo/recent` with header
-`X-eBirdApiToken: {EBIRD_API_KEY}` from edge function secrets. Cache responses
-15 minutes, keyed on coordinates rounded to 1 decimal place, so many users share
-one upstream call.
+`X-eBirdApiToken: {EBIRD_API_KEY}` from edge function secrets. Cache 15 minutes,
+keyed on coordinates rounded to 1 decimal place, so many users share one
+upstream call.
 
-The eBird key must **never** reach the browser — all eBird calls go through this
-function.
+The eBird key must **never** reach the browser. All eBird calls go through a
+server function.
 
 ## Copy rules
 
-The number is a **detection probability**, not a guarantee a bird is present.
-Wording must reflect that:
+The number is a **detection probability**, not a guarantee a bird is present:
 
 ```
 ✓  "74% of birders doing a 1-hour walk here at this hour reported this species"
@@ -190,22 +474,24 @@ Wording must reflect that:
 ✗  "74% chance the bird is present"
 ```
 
-Include a short "How this works" page: the model is fitted on complete eBird
-checklists; it predicts whether someone like you, birding the way you plan to,
-historically reported the species; time of day and how long you bird matter far
-more than weather.
+Never invent a number for a greyed cell, and never render null as 0%.
 
 ## Design
 
 Clean and quiet. Field-guide restraint, not a dashboard. One accent colour used
 sparingly — a deep teal works well against the greens birders expect. Generous
 whitespace, real type hierarchy, no gradient heroes, no emoji as section
-markers. The forecast heatmap is the visual centrepiece; everything else should
-recede.
+markers. The forecast heatmap is the visual centrepiece; everything else
+recedes.
 
 Dark mode supported, designed rather than auto-inverted.
 
 ## Build order
 
-Build in this sequence and get each working before the next: auth → log form →
-my logs → forecast grid with placeholder coefficients → nearby → styling.
+Build in this sequence, each working before the next:
+
+auth → log form → my logs → score.ts + forecast grid → coverage strip and
+greying → nearby hotspots → styling.
+
+Do the greying before the hotspot list. It is the behaviour most likely to be
+skipped, and skipping it makes the app confidently wrong for most of the year.
