@@ -7,8 +7,16 @@ on:
   workflow_dispatch:          # and a manual button
     inputs:
       mode:
-        description: 'daily | monthly | all'
+        description: 'what to run'
+        # a choice, not free text: as a text box this defaulted to daily and
+        # a run started without editing it looked like a monthly refit that
+        # had quietly produced no model
+        type: choice
         default: 'daily'
+        options:
+          - daily            # scrape recent checklists
+          - monthly          # refit and publish
+          - all              # both
 
 jobs:
   pipeline:
