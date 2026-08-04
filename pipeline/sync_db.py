@@ -78,21 +78,27 @@ def merge(local, incoming):
     for tbl, keys in KEYS.items():
         if tbl not in remote_tables:
             continue
-        # column order must agree for the positional insert below; both files
-        # were created by the same code, so a mismatch means one of them is
-        # from an older schema and merging would shift values between columns
+        # Columns are named rather than taken positionally, because the two
+        # files legitimately disagree on order: a column added later by ALTER
+        # TABLE lands at the end, while a database built from scratch gets it
+        # wherever CREATE TABLE declares it. Same schema, different layout —
+        # and a positional insert would silently write each column's values
+        # into its neighbour.
         cols = [c[0] for c in con.execute(f"describe {tbl}").fetchall()]
         rcols = [c[0] for c in
                  con.execute(f"describe incoming.main.{tbl}").fetchall()]
-        if cols != rcols:
-            sys.exit(f"{tbl}: schema differs between local and remote.\n"
-                     f"  local  {cols}\n  remote {rcols}\n"
-                     "Re-scrape or migrate before syncing.")
+        if set(cols) != set(rcols):
+            only_l = sorted(set(cols) - set(rcols))
+            only_r = sorted(set(rcols) - set(cols))
+            sys.exit(f"{tbl}: the two databases hold different columns.\n"
+                     f"  only local  {only_l}\n  only remote {only_r}\n"
+                     "One side is from an older schema. Migrate before syncing.")
         on = " and ".join(f"l.{k} = r.{k}" for k in keys)
         before = con.execute(f"select count(*) from {tbl}").fetchone()[0]
         con.execute(f"""
-            insert into {tbl}
-            select r.* from incoming.main.{tbl} r
+            insert into {tbl} ({", ".join(cols)})
+            select {", ".join(f"r.{c}" for c in cols)}
+            from incoming.main.{tbl} r
             where not exists (select 1 from {tbl} l where {on})
         """)
         after = con.execute(f"select count(*) from {tbl}").fetchone()[0]
