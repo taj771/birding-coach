@@ -75,14 +75,29 @@ jobs:
           python - <<'PY'
           import os
           from huggingface_hub import HfApi
+
           api = HfApi(token=os.environ["HF_TOKEN"].strip())
-          role = api.whoami().get("auth", {}).get("accessToken", {}).get("role")
-          print(f"HF token role: {role}")
-          # a read token pulls fine and then fails at the end of the run,
-          # after the whole scrape has already been spent
-          assert role == "write", "HF_TOKEN must be a write token"
+
+          # repo_info proves the token reaches this dataset at all, which is
+          # the failure worth catching before the scrape is spent
           info = api.repo_info(os.environ["HF_DATASET"].strip(), repo_type="dataset")
           print(f"HF dataset: {info.id} (private={info.private})")
+
+          # The role check is best effort. /whoami-v2 is rate limited far more
+          # strictly than the rest of the API, so on a busy day it refuses and
+          # a hard assert here would fail a run whose credentials are fine.
+          try:
+              role = api.whoami().get("auth", {}).get("accessToken", {}).get("role")
+              print(f"HF token role: {role}")
+              if role != "write":
+                  raise SystemExit(
+                      f"HF_TOKEN is a '{role}' token. The run ends by pushing "
+                      "the database back, which needs write.")
+          except SystemExit:
+              raise
+          except Exception as e:
+              print(f"::warning::could not read the token role ({type(e).__name__}). "
+                    "Continuing — a read-only token would fail at the final push.")
           PY
           python -c "import duckdb, pandas, sklearn, statsmodels, requests; print('imports ok')"
 
