@@ -1,132 +1,80 @@
 Do not rebuild the app. Apply these changes to what already exists.
 
-The statistical model is now fitted, so the placeholder coefficients and the
-simplified scoring formula from the original spec are both wrong and must be
-replaced. Auth, the log form, "my logs", the hotspot list, the copy rules and
-the design are all correct — leave them alone.
+The statistical model is now fitted. The placeholder coefficients and the
+simplified scoring formula from the original spec are both wrong and must go.
+Auth, the log form, "my logs", the copy rules and the visual design are correct
+— leave them alone.
 
-There are nine changes. Do them in this order.
+Seven changes, in this order.
 
 ---
 
-## 1. Schema: one new column, and reseed the species table
+## 1. The model is fetched from a URL, not stored in the database
 
-```sql
-alter table checklists add column if not exists ebird_loc_id text;
+Do not create `model_coefficients` or `hotspots` tables. Nothing needs seeding
+and there are no rows to load. The fitted model is published as static JSON on
+a public Hugging Face dataset and the app reads it directly.
+
+```
+https://huggingface.co/datasets/taj771/birding-coach-model/resolve/main/
+  meta.json                 region, extent, which weeks and hours are fitted
+  species.json              [{ species_code, common_name }] — 69 entries
+  hotspots.json             [{ loc_id, name, latitude, longitude, n_checklists }] — 192
+  coef/<species_code>.json  the flat term lookup for one species
 ```
 
-Set it when the user's chosen point is within 200 m of a known eBird hotspot.
-It is what lets a logged outing be matched to a site the model knows.
+Public, CORS-enabled, CDN-served. Gzipped: `species.json` 1 KB,
+`hotspots.json` 5.5 KB, one species 3.7 KB.
 
-Then replace the species table contents. The picker currently offers species
-the model cannot forecast, which is a dead end for the user — every species
-listed must have coefficients.
+```ts
+// src/lib/model.ts
+const BASE = "https://huggingface.co/datasets/taj771/birding-coach-model/resolve/main";
 
-```sql
-delete from species;
-insert into species (species_code, common_name) values
-  ('acafly', 'Acadian Flycatcher'),
-  ('amecro', 'American Crow'),
-  ('amegfi', 'American Goldfinch'),
-  ('amered', 'American Redstart'),
-  ('amerob', 'American Robin'),
-  ('babwar', 'Bay-breasted Warbler'),
-  ('balori', 'Baltimore Oriole'),
-  ('barswa', 'Barn Swallow'),
-  ('bkbwar', 'Blackburnian Warbler'),
-  ('bkcchi', 'Black-capped Chickadee'),
-  ('blujay', 'Blue Jay'),
-  ('bnhcow', 'Brown-headed Cowbird'),
-  ('btnwar', 'Black-throated Green Warbler'),
-  ('buggna', 'Blue-gray Gnatcatcher'),
-  ('cangoo', 'Canada Goose'),
-  ('carchi', 'Carolina Chickadee'),
-  ('carwre', 'Carolina Wren'),
-  ('cedwax', 'Cedar Waxwing'),
-  ('chispa', 'Chipping Sparrow'),
-  ('chiswi', 'Chimney Swift'),
-  ('comgra', 'Common Grackle'),
-  ('comyel', 'Common Yellowthroat'),
-  ('dowwoo', 'Downy Woodpecker'),
-  ('easblu', 'Eastern Bluebird'),
-  ('easpho', 'Eastern Phoebe'),
-  ('eastow', 'Eastern Towhee'),
-  ('eawpew', 'Eastern Wood-Pewee'),
-  ('eawvir1', 'Eastern Warbling Vireo'),
-  ('eursta', 'European Starling'),
-  ('fiespa', 'Field Sparrow'),
-  ('grbher3', 'Great Blue Heron'),
-  ('grycat', 'Gray Catbird'),
-  ('haiwoo', 'Hairy Woodpecker'),
-  ('hoowar', 'Hooded Warbler'),
-  ('houfin', 'House Finch'),
-  ('houspa', 'House Sparrow'),
-  ('houwre', 'Northern House Wren'),
-  ('indbun', 'Indigo Bunting'),
-  ('killde', 'Killdeer'),
-  ('magwar', 'Magnolia Warbler'),
-  ('mallar3', 'Mallard'),
-  ('moudov', 'Mourning Dove'),
-  ('naswar', 'Nashville Warbler'),
-  ('norcar', 'Northern Cardinal'),
-  ('norfli', 'Northern Flicker'),
-  ('normoc', 'Northern Mockingbird'),
-  ('norpar', 'Northern Parula'),
-  ('nrwswa', 'Northern Rough-winged Swallow'),
-  ('orcori', 'Orchard Oriole'),
-  ('pilwoo', 'Pileated Woodpecker'),
-  ('rebwoo', 'Red-bellied Woodpecker'),
-  ('reevir1', 'Red-eyed Vireo'),
-  ('rethaw', 'Red-tailed Hawk'),
-  ('rewbla', 'Red-winged Blackbird'),
-  ('robgro', 'Rose-breasted Grosbeak'),
-  ('rocpig1', 'Rock Pigeon (Feral Pigeon)'),
-  ('rthhum', 'Ruby-throated Hummingbird'),
-  ('scatan', 'Scarlet Tanager'),
-  ('sonspa', 'Song Sparrow'),
-  ('tenwar', 'Tennessee Warbler'),
-  ('treswa', 'Tree Swallow'),
-  ('tuftit', 'Tufted Titmouse'),
-  ('turvul', 'Turkey Vulture'),
-  ('whbnut', 'White-breasted Nuthatch'),
-  ('whtspa', 'White-throated Sparrow'),
-  ('woothr', 'Wood Thrush'),
-  ('yelwar1', 'Northern Yellow Warbler'),
-  ('yerwar', 'Yellow-rumped Warbler'),
-  ('yesfli', 'Northern Flicker (Yellow-shafted)');
+export const getMeta     = () => fetch(`${BASE}/meta.json`).then(r => r.json());
+export const getSpecies  = () => fetch(`${BASE}/species.json`).then(r => r.json());
+export const getHotspots = () => fetch(`${BASE}/hotspots.json`).then(r => r.json());
+export const getCoef = (code: string) =>
+  fetch(`${BASE}/coef/${code}.json`).then(r => r.json()) as
+    Promise<Record<string, number>>;
 ```
 
-Also make sure `model_coefficients` has an index on `species_code`:
+Fetch `meta`, `species` and `hotspots` once on load. Fetch `coef/<code>.json`
+when the user picks a species and cache it in memory. At 4 KB it needs no more
+than a brief spinner.
 
-```sql
-create index if not exists model_coefficients_species_idx
-  on model_coefficients (species_code);
-```
+**Why not the database.** The checklist history behind the model is private —
+eBird does not permit redistributing observations. Fitted coefficients are
+derived work and are publishable, which is what makes this possible. Keeping
+them in a private store would mean putting an access token in the browser,
+where it would not be secret. It also removes a whole class of failure: the
+pipeline refits monthly and pushes, the app reads whatever is there, and there
+is no migration to run or state to keep in sync.
 
-I will load the 17,526 coefficient rows myself through the SQL editor.
+The species picker must read `species.json`, not a local table, so it can never
+offer a species the model cannot score.
 
 ---
 
 ## 2. Delete the placeholder coefficients
 
 The original spec gave hardcoded values (`intercept -0.40`, `hour_06 +0.55`,
-`log_duration +0.75` and so on) to make the UI testable before the model
-existed. Remove every trace of them. If a species has no rows in
-`model_coefficients`, show "model not loaded for this species" — never fall
-back to invented numbers.
+`log_duration +0.75` and so on) so the UI was testable before the model
+existed. Remove every trace. If a fetch fails, say so — never fall back to
+invented numbers.
 
-Note the term name changed: it is `log_dur`, not `log_duration`.
+The term name also changed: it is `log_dur`, not `log_duration`.
 
 ---
 
 ## 3. Replace the scoring code
 
-Create `src/lib/score.ts` with exactly this content, and delete whatever
-scoring logic currently exists. The old formula had five terms; the real model
-has twelve, including per-week and per-site effects that the old version had no
-concept of.
+Create `src/lib/score.ts` with exactly this content and delete whatever scoring
+logic currently exists. The old formula had five terms; the real model has
+twelve, including per-week and per-site effects the old version had no concept
+of.
 
-Use these functions. Do not reimplement the arithmetic in the edge function.
+Do not reimplement this arithmetic anywhere else, in an edge function or
+otherwise.
 
 ```ts
 type Coef = Record<string, number>;
@@ -309,239 +257,27 @@ export function inCoverage(lat: number, lon: number): boolean {
 
 ---
 
-## 4. The forecast edge function calls `grid()`
+## 4. Replace the forecast panel with this component
+
+This panel and its map were built and checked locally against the real model
+before this was written, so here is the component rather than another
+description of it. Create `src/components/ForecastPanel.tsx`.
+
+It imports from `./score` — fix the path if yours differs. It expects:
 
 ```
-POST { species_code, latitude, longitude, duration_min, ebird_loc_id? }
-→ { grid: [{ day, hour, probability, reason }], best, drivers, modelledWeeks,
-    inCoverage }
-```
-
-1. If `inCoverage(latitude, longitude)` is false, return immediately with
-   `inCoverage: false` and no grid.
-2. Fetch the 7-day hourly forecast from Open-Meteo (no key needed):
-   `https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,precipitation,wind_speed_10m,cloud_cover&forecast_days=7&timezone=auto`
-3. Load that species' rows from `model_coefficients` into a flat
-   `Record<string, number>` keyed on `term`.
-4. Call `grid()`. Return what it gives you.
-
----
-
-## 5. The forecast screen must show what the model cannot answer
-
-This is the substantive change, and the part most likely to be skipped. The
-model has real gaps, and the previous version had no way to express them — it
-would have shown a confident number in every cell regardless.
-
-**Out of area.** When `inCoverage` is false, replace the entire forecast with a
-panel. No grid, greyed or otherwise:
-
-```
-Birding Coach currently covers Allegheny County, Pennsylvania.
-We have no data for this location, so there is nothing to forecast.
-
-You can still log sightings here — they count toward your list.
-```
-
-Draw the county outline on the map and default the map to Pittsburgh rather
-than browser geolocation, so a user elsewhere does not land on an error.
-
-The bounds are in `EXTENT`: latitude 40.19 to 40.68, longitude −80.34 to
-−79.69. This matters because nothing in `score()` knows where it is — a point
-in Philadelphia matches none of the 192 hotspot terms, silently falls back to
-the pooled baseline, and returns a confident number assembled entirely from
-Pittsburgh's data. The user has no way to tell that apart from a real answer.
-
-**Coverage strip.** Directly under the controls, always visible:
-
-```
-This model covers 15 weeks of the year — mostly late April to early June,
-plus scattered weeks elsewhere. Dates outside them are shown greyed.
-```
-
-Render it as a slim 52-cell year bar with the fitted weeks filled and the
-current week marked. `modelledWeeks()` returns which ones. The gap should be
-visible at a glance, not buried in a sentence.
-
-**Grid rows are hours 06:00 to 20:00.** Fifteen rows, not 05:00–21:00. Outside
-those hours there are too few checklists to estimate anything.
-
-**Null cells render greyed, never as 0%.** The tooltip depends on `reason`:
-
-```
-"hour"      too few checklists at this hour to estimate
-"week"      no data for this week of the year
-"forecast"  beyond the weather forecast
-```
-
-If every cell is null because the whole week is unmodelled, replace the grid
-with an explanatory panel rather than a wall of grey, and name the nearest
-weeks the model does cover.
-
-**Hotspots without their own effect** get labelled. `hasSiteEffect(coef, locId)`
-is false for any location outside the 192 modelled hotspots; those show a
-county-wide estimate, and the list should say so rather than presenting it as a
-local number.
-
----
-
-## 6. Driver breakdown comes from `drivers()`
-
-If the current version computes the "why" list by reading coefficients, replace
-it. Coefficients are log-odds; they do not add up to the percentage on screen.
-`drivers()` re-scores counterfactually against a reference outing (10:00, 30
-minutes, median wind) so the numbers shown actually reconcile with the total.
-
----
-
-## What must not change
-
-Auth, the log form and its required effort fields, "my logs", the eBird hotspot
-proxy and its caching, the copy rules about detection probability, and the
-visual design. Those were right and nothing about the model changes them.
-
----
-
-## 7. Maps: Leaflet and OpenStreetMap, no API key
-
-If the map currently uses Mapbox, Google Maps, or anything else needing an API
-key or a billing account, replace it. Use `react-leaflet` with OpenStreetMap
-tiles — free, no token, no sign-up.
-
-```
-npm i leaflet react-leaflet
-```
-
-Use the **greyscale CARTO Positron** tiles, not standard OpenStreetMap. Also
-free and keyless. Standard OSM renders parks green, and birding hotspots are
-overwhelmingly parks — a green-shaded pin sits invisibly on exactly the
-landcover it is most often placed on. A muted basemap makes the data the only
-saturated thing on screen.
-
-```tsx
-import { MapContainer, TileLayer, CircleMarker, Rectangle } from "react-leaflet";
-import "leaflet/dist/leaflet.css";
-
-<MapContainer center={[40.44, -79.99]} zoom={10}>
-  <TileLayer
-    url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-    subdomains="abcd"
-    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-  />
-  ...
-</MapContainer>
-```
-
-Attribution is required by both the OpenStreetMap and CARTO usage policies.
-
-**Pin colour ramp: pale magenta to deep purple**, `#fcd9f0` → `#b13a8e` →
-`#4a0c55`. Nothing in a street basemap occupies that hue — greens are
-landcover, blues are water, greys and yellows are roads — and it stays ordered
-in greyscale because lightness falls along it. Give each pin a white ring
-(`weight: 1.6`) so it lifts off whatever is underneath.
-
-Keep the teal accent for the interface. It is the map data specifically that
-must not be green.
-
-Two known Leaflet gotchas, both of which look like the map is broken:
-
-- The container needs an explicit height. `MapContainer` with no `height` in CSS
-  renders zero pixels tall and the map appears missing entirely.
-- The default marker icons resolve to broken image paths under a bundler. Import
-  the marker images explicitly or set a custom `L.Icon`.
-
-**Draw the coverage area as a rectangle, not the county's true outline.**
-
-```tsx
-<Rectangle bounds={[[40.19, -80.34], [40.68, -79.69]]}
-           pathOptions={{ color: "#8a9a97", weight: 1, fill: false,
-                          dashArray: "5 5" }} />
-```
-
-Those are the exact bounds `inCoverage()` tests. The real county boundary is an
-irregular shape that does not match them, so drawing it would tell the user the
-forecast works in places it refuses and refuses in places it works. Show the
-rectangle the code actually enforces.
-
-For the log form's location picker, a click handler that sets a marker is
-enough. No geocoding service, no address search — those need keys too.
-
----
-
-## 8. Hotspots come from a table, not from the eBird API
-
-Remove the runtime call to `api.ebird.org/v2/ref/hotspot/geo` and the caching
-around it. I will paste a `hotspots` table with 192 rows:
-
-```sql
-create table if not exists hotspots (
-  loc_id        text primary key,
-  name          text not null,
-  latitude      double precision not null,
-  longitude     double precision not null,
-  n_checklists  integer not null
-);
-```
-
-These are exactly the hotspots the model carries a site effect for. Every other
-hotspot in the county falls back to the pooled baseline, so querying eBird live
-would mostly return places the model cannot speak to — pins that look like local
-predictions but are county averages.
-
-This removes the eBird key from the app entirely, along with the server-side
-proxy and its cache. Drop the `nearby` edge function too unless it is already
-working; the app then talks only to Supabase and to Open-Meteo, neither of
-which needs a secret.
-
-**On the map**, show all 192 as pins. Scale or shade each by its probability
-for the selected species once a species is chosen. `n_checklists` is how many
-times that spot appears in the training data — use it to convey confidence, and
-sort ties by it. The range is wide:
-
-```
-Frick Park--Beechwood Entrance     164 checklists
-Beechwood Farms Nature Reserve     106
-...
-many sites                           3-5
-```
-
-**The nearby list** becomes a query against this table rather than an API call:
-compute distance from the user's point in the client, keep those within 25 km,
-score each, and sort by probability rather than distance. There is no rate limit
-and no latency, so there is no reason to cap it at 10 — score all of them.
-
-Selecting a pin passes its `loc_id` to `score()` so it uses that site's own
-effect. Every pin in this table returns true from `hasSiteEffect()`, so the
-"county-wide estimate" label only appears for a point the user drops themselves.
-
----
-
-## 9. Replace the forecast panel with this exact component
-
-The forecast panel and its map were built and checked locally against the real
-model before this was written. Rather than describing the layout again, here is
-the component. Create `src/components/ForecastPanel.tsx` with this content and
-render it in place of whatever forecast screen currently exists.
-
-It imports from `./score` — the file in section 3 — so put `score.ts` alongside
-it or fix the import path. It does not reimplement any scoring.
-
-What it expects from you:
-
-```
-coefficients  Record<string, number> for the selected species, keyed on `term`
-              from model_coefficients. Load it when the species changes.
-hotspots      all 192 rows of the hotspots table
+coefficients  the object from getCoef(code)
+hotspots      the array from getHotspots()
 speciesName   the common name, for the heading
 ```
 
-The species picker lives outside this component — it owns date, hour, duration
+The species picker lives outside it. This component owns date, hour, duration
 and the map, nothing else.
 
 Do not redesign the layout, reorder the panel, or move the coverage bar. The
-ordering is deliberate: the user sees how much of the year the model cannot
-answer for before they see any number. Styling is Tailwind and can be adjusted
-to match the rest of the app, but the structure should stay.
+ordering is deliberate — the user sees how much of the year the model cannot
+answer for before they see any number. Tailwind classes can be adjusted to
+match the rest of the app; the structure should stay.
 
 ```tsx
 /**
@@ -820,14 +556,108 @@ const Note = ({ children, warn }:
 );
 ```
 
-### One thing to be aware of
+---
 
-Weather comes from Open-Meteo's forecast, which reaches 16 days ahead. The date
-input is therefore bounded at today and the component reports "beyond the
-forecast horizon" past that. That is correct behaviour, not a bug to work
-around — there is no weather to feed the model beyond it.
+## 5. Maps: Leaflet with a greyscale basemap
 
-The single fetch uses the centre of the county rather than each hotspot's own
-coordinates. The whole county sits inside roughly nine 0.25 degree weather
-cells, so per-hotspot fetches would be 192 near-identical calls for differences
-smaller than the model can resolve.
+If the map uses Mapbox, Google Maps, or anything needing an API key or billing
+account, replace it. `react-leaflet` with CARTO Positron tiles needs neither.
+
+```
+npm i leaflet react-leaflet
+```
+
+Use **Positron**, not standard OpenStreetMap. OSM renders parks green, and
+birding hotspots are overwhelmingly parks — a green-shaded pin sits invisibly
+on exactly the landcover it is most often placed on. A muted basemap makes the
+data the only saturated thing on screen.
+
+```tsx
+<TileLayer
+  url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+  subdomains="abcd"
+  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
+/>
+```
+
+Attribution is required by both usage policies.
+
+Two Leaflet gotchas that both look like the map is broken:
+
+- `MapContainer` needs an explicit height. Without one it renders zero pixels
+  tall and the map appears missing entirely.
+- Default marker icons resolve to broken paths under a bundler. The component
+  above uses `CircleMarker`, which avoids this; if you add pins elsewhere,
+  import the icon images explicitly.
+
+Keep the teal accent for the interface. It is the map data specifically that
+must not be green.
+
+---
+
+## 6. Schema: one new column
+
+```sql
+alter table checklists add column if not exists ebird_loc_id text;
+```
+
+Set it when the user's chosen point is within 200 m of a hotspot in
+`hotspots.json`. It is what lets a logged outing be matched to a site the model
+knows.
+
+That is the only schema change. Everything else stays.
+
+---
+
+## 7. What the model refuses to answer
+
+The behaviour most likely to be dropped, and the reason the panel is written
+the way it is. The model has real gaps and the previous version had no way to
+express them — it would have shown a confident number in every case.
+
+**Geography.** `inCoverage(lat, lon)` bounds the forecast to Allegheny County,
+latitude 40.19 to 40.68, longitude −80.34 to −79.69. Outside it, replace the
+whole forecast with a panel — no grid, no pins:
+
+```
+Birding Coach currently covers Allegheny County, Pennsylvania.
+We have no data for this location, so there is nothing to forecast.
+
+You can still log sightings here — they count toward your list.
+```
+
+This matters because nothing in `score()` knows where it is. A point in
+Philadelphia matches none of the 192 hotspot terms, silently falls back to the
+pooled baseline, and returns a confident number assembled entirely from
+Pittsburgh's data. The user cannot tell that apart from a real answer.
+
+Draw the coverage rectangle, not the county's true outline — the rectangle is
+what the code enforces, and the real boundary would promise forecasts outside
+it and deny them inside. Default the map to Pittsburgh rather than browser
+geolocation so a user elsewhere does not land on an error.
+
+**Weeks.** Only 15 of 53 are fitted. `modelledWeeks()` returns which. A date in
+any other week scores `null` and the panel says so. Reading a missing week as
+zero would not mean "average week" — it would drop seasonality out of the sum
+entirely, and seasonality is most of what the model knows about migrants.
+
+**Hours.** 06:00 to 20:00 only. Outside those, too few checklists exist to
+estimate anything.
+
+**Sites.** All 192 hotspots carry their own effect, so every pin from
+`hotspots.json` is a real local estimate. A point the user drops themselves
+falls back to the county baseline — `hasSiteEffect()` is false there, and the
+UI should say "county-wide estimate".
+
+Never render `null` as 0%.
+
+---
+
+## What must not change
+
+Auth, the log form and its required effort fields, "my logs", the copy rules
+about detection probability, and the visual design. Those were right and
+nothing about the model touches them.
+
+Supabase keeps only user data: accounts, their checklists, their observations,
+and the row-level security already on them.
