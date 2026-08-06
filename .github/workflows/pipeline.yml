@@ -117,6 +117,9 @@ jobs:
           # the checklist database lives in a private HF dataset, not in git —
           # without these the runner starts from an empty seven-day window
           HF_DATASET:           ${{ secrets.HF_DATASET }}
+          # the public dataset the app reads — coefficients only, never
+          # eBird records, so it needs no token on the browser side
+          HF_PUBLIC_DATASET:    ${{ secrets.HF_PUBLIC_DATASET }}
           HF_TOKEN:             ${{ secrets.HF_TOKEN }}
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

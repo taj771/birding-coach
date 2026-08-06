@@ -67,6 +67,8 @@ if __name__ == "__main__":
     if mode in ("monthly", "all"):
         run("build_model_table.py")     # + weather, one row per checklist
         run("fit_logit.py")             # -> data/model_coefficients.json
-        run("publish.py")               # -> wherever the app reads from
+        run("export_hotspots.py")       # the sites that carry their own effect
+        run("publish.py")               # -> Supabase, or SQL to paste
+        run("publish_public.py")        # -> the public dataset the app reads
 
     print("\ndone.")
