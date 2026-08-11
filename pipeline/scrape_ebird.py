@@ -143,9 +143,21 @@ def scrape(con, dates):
             if not c:
                 continue
             row, obs_rows = parse(c)
-            con.execute("INSERT OR IGNORE INTO checklists VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())", row)
+            # Columns are named, not positional. `observer` was added by ALTER
+            # TABLE after the first scrapes, so it sits at the end of an older
+            # database and in the middle of one built from CREATE TABLE. A
+            # positional insert silently wrote a birder's name into scraped_at
+            # on whichever of the two it was not written for.
+            con.execute(
+                "INSERT OR IGNORE INTO checklists "
+                "(sub_id, loc_id, region, obs_dt, obs_date, obs_time, "
+                " duration_hrs, distance_km, n_observers, protocol_id, "
+                " all_reported, richness, observer, scraped_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, now())", row)
             if obs_rows:
-                con.executemany("INSERT OR IGNORE INTO observations VALUES (?,?,?)", obs_rows)
+                con.executemany(
+                    "INSERT OR IGNORE INTO observations "
+                    "(sub_id, species_code, how_many) VALUES (?,?,?)", obs_rows)
             seen.add(sub)
             added += 1
             if j % 25 == 0:
