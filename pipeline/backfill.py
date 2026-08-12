@@ -43,9 +43,11 @@ DAYS_FILE = ROOT / "data" / "scrape_days.json"
 LAG_DAYS = 7
 # rough checklists per day in Allegheny, for the estimate only
 PER_DAY = 110
-# days per push. Small enough that a killed job loses under an hour, large
-# enough that the database is not shipped to Hugging Face every few minutes.
-CHUNK = 40
+# Days per push. A run cancelled at day 34 of a 40-day chunk lost all 34,
+# because nothing had been pushed yet — so this is now small enough that a
+# cancellation costs minutes rather than an hour, while still not shipping the
+# whole database to Hugging Face every ninety seconds.
+CHUNK = 15
 
 
 def run(script, *args):
