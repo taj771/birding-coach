@@ -104,13 +104,19 @@ if __name__ == "__main__":
         # this script and has no primary key on older databases, so OR IGNORE
         # would quietly duplicate instead of skipping. Columns named, never
         # positional — the same lesson the checklists insert already carries.
+        # Counted around the insert. DuckDB has no changes() — that is SQLite,
+        # and calling it here failed the job *after* the rows had already
+        # landed, which is the worst place to put a cosmetic statement.
+        before = con.execute("SELECT count(*) FROM locations").fetchone()[0]
         con.execute("""
             INSERT INTO locations (loc_id, lat, lon, is_hotspot)
             SELECT d.loc_id, d.lat, d.lon, d.is_hotspot
             FROM df d
             WHERE NOT EXISTS (SELECT 1 FROM locations l WHERE l.loc_id = d.loc_id)
         """)
-        print(f"\ninserted {con.execute('SELECT changes()').fetchone()[0]} new sites")
+        after = con.execute("SELECT count(*) FROM locations").fetchone()[0]
+        print(f"\ninserted {after - before} new sites "
+              f"({len(df)} seen, {len(df) - (after - before)} already known)")
     else:
         df = pd.DataFrame(columns=["loc_id", "lat", "lon", "is_hotspot"])
 
@@ -144,9 +150,15 @@ if __name__ == "__main__":
         print(f"county span: ~{span_km:.0f} km north-south "
               f"-> {'MORE than' if span_km > 25 else 'within'} one 0.25 deg ERA5 cell")
 
-    # A site with no coordinates drops its checklists from the model table
-    # silently, so this is worth failing on rather than printing past.
-    if missing:
-        sys.exit(f"\n{missing} site(s) still have no coordinates. Re-run to "
-                 f"retry the days above; if it persists, those loc_ids are not "
-                 f"appearing in any feed response and need looking at.")
+    # A site with no coordinates drops its checklists from the model table, so
+    # this matters — but it is not worth failing a long backfill over. Days
+    # that lost their feed call to a rate limit are simply picked up by the
+    # next chunk, since the day list is a query rather than a fixed plan. The
+    # gate that must be strict is the monthly fit, not this.
+    if missing and failed:
+        print(f"\n{missing} site(s) have no coordinates yet, from {len(failed)} "
+              f"day(s) that could not be fetched. The next run retries them.")
+    elif missing:
+        sys.exit(f"\n{missing} site(s) have no coordinates, and every day "
+                 f"fetched cleanly — so these loc_ids are not appearing in any "
+                 f"feed response and need looking at.")
