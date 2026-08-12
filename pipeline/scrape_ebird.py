@@ -16,29 +16,24 @@ import time
 from pathlib import Path
 
 import duckdb
-import requests
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
 
-# .strip() matters: a secret pasted with a trailing newline makes requests
-# raise InvalidHeader on every call, which looks like an API outage
-KEY = (os.getenv("EBIRD_API_KEY") or "").strip()
-if not KEY:
-    sys.exit("EBIRD_API_KEY not set — put it in .env locally, or in\n"
-         "GitHub Settings > Secrets and variables > Actions")
+# The key check, the session and the retry/backoff all live in ebird_api now.
+# They used to live here alone, which is why backfill_locations.py had none of
+# them and died on the first 429 it met.
+sys.path.insert(0, str(Path(__file__).parent))
+import ebird_api                                          # noqa: E402
+from ebird_api import get                                 # noqa: E402
 
 REGION = os.getenv("SCRAPE_REGION", "US-PA-003")  # Allegheny County
 DB = ROOT / "data" / "birding.duckdb"
 DAYS = ROOT / "data" / "scrape_days.json"
-DELAY = float(os.getenv("SCRAPE_DELAY", "0.4"))
+DELAY = ebird_api.DELAY
 
 DB.parent.mkdir(exist_ok=True)      # fresh checkout has no data/
-
-BASE = "https://api.ebird.org/v2"
-HEADERS = {"X-eBirdApiToken": KEY}
-sess = requests.Session()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS checklists (
@@ -64,26 +59,6 @@ CREATE TABLE IF NOT EXISTS observations (
     PRIMARY KEY (sub_id, species_code)
 );
 """
-
-
-def get(path, **params):
-    """One GET with retries. Returns parsed JSON or None."""
-    for attempt in range(4):
-        try:
-            r = sess.get(f"{BASE}{path}", headers=HEADERS, params=params, timeout=45)
-            if r.status_code == 200:
-                time.sleep(DELAY)
-                return r.json()
-            if r.status_code == 429:          # rate limited — back off hard
-                time.sleep(30 * (attempt + 1))
-                continue
-            if r.status_code == 404:
-                return None
-            print(f"    HTTP {r.status_code} on {path}", flush=True)
-        except requests.RequestException as e:
-            print(f"    {type(e).__name__} on {path}", flush=True)
-        time.sleep(3 * (attempt + 1))
-    return None
 
 
 def parse(c):
