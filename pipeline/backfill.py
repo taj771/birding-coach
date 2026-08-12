@@ -68,8 +68,10 @@ def already_have():
 
 
 def parse(s):
+    # stripped first: a date typed into a web form arrives with whatever
+    # whitespace came with it, and refusing a trailing space helps nobody
     try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
     except ValueError:
         sys.exit(f"dates must look like 2025-08-01, got {s!r}")
 
