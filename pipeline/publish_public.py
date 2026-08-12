@@ -87,8 +87,22 @@ def build(models, names):
     # The forecast still fetches one species at a time — it only ever needs one.
     (BUNDLE / "all.json").write_text(json.dumps(flattened, separators=(",", ":")))
 
+    # Photos, if they have been resolved. Kept in their own file rather than
+    # folded into species.json: the forecast needs the species list on every
+    # load and has no use for pictures, while the log form wants them only when
+    # someone opens the identification helper.
+    photos = {}
+    src = DATA / "photos.json"
+    if src.exists():
+        raw = json.loads(src.read_text())
+        photos = {sp: {k: v for k, v in e.items() if k in ("months", "female")}
+                  for sp, e in raw.items() if e.get("months")}
+        (BUNDLE / "photos.json").write_text(json.dumps(photos, separators=(",", ":")))
+
     (BUNDLE / "species.json").write_text(json.dumps(
-        sorted(({"species_code": sp, "common_name": names.get(sp, sp)}
+        sorted(({"species_code": sp,
+                 "common_name": names.get(sp, sp),
+                 "has_photos": sp in photos}
                 for sp in models), key=lambda d: d["common_name"]),
         separators=(",", ":")))
 
