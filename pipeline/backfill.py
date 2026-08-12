@@ -42,7 +42,10 @@ DAYS_FILE = ROOT / "data" / "scrape_days.json"
 # eBird submissions trail the outing; the same seven days the daily job waits
 LAG_DAYS = 7
 # rough checklists per day in Allegheny, for the estimate only
-PER_DAY = 100
+PER_DAY = 110
+# days per push. Small enough that a killed job loses under an hour, large
+# enough that the database is not shipped to Hugging Face every few minutes.
+CHUNK = 40
 
 
 def run(script, *args):
@@ -108,13 +111,20 @@ if __name__ == "__main__":
           f"~{calls * 0.4 / 3600:.1f} h at 0.4 s between them")
     print(f"weeks hit  {sorted({d.timetuple().tm_yday // 7 for d in todo})}")
 
-    DAYS_FILE.write_text(json.dumps(
-        [{"date": str(d), "kind": "backfill", "wind_max": 0.0} for d in todo],
-        indent=2))
-
-    run("scrape_ebird.py")
-    run("backfill_locations.py")
-    run("sync_db.py", "push")
+    # Scrape in chunks and push after each one. A long backfill can outlast a
+    # CI job's timeout, and a single push at the end would mean a killed job
+    # threw away everything it had fetched. Pushing every CHUNK days bounds the
+    # loss to one chunk, and re-running resumes from whatever landed.
+    for i in range(0, len(todo), CHUNK):
+        batch = todo[i:i + CHUNK]
+        print(f"\n{'#' * 60}\n#  chunk {i // CHUNK + 1}: {batch[0]} .. {batch[-1]} "
+              f"({len(batch)} days)\n{'#' * 60}", flush=True)
+        DAYS_FILE.write_text(json.dumps(
+            [{"date": str(d), "kind": "backfill", "wind_max": 0.0} for d in batch],
+            indent=2))
+        run("scrape_ebird.py")
+        run("backfill_locations.py")
+        run("sync_db.py", "push")
 
     left = [d for d in wanted if d not in already_have()]
     print(f"\ndone. {len(left)} days of the range still missing.")
