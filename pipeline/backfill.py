@@ -126,9 +126,15 @@ if __name__ == "__main__":
         DAYS_FILE.write_text(json.dumps(
             [{"date": str(d), "kind": "backfill", "wind_max": 0.0} for d in batch],
             indent=2))
-        run("scrape_ebird.py")
-        run("backfill_locations.py")
-        run("sync_db.py", "push")
+        # The push goes in a finally. Chunking exists so that a killed run
+        # loses one chunk rather than everything, and that guarantee only holds
+        # if the push happens — a crash in a *later* step would otherwise throw
+        # away scraping that had already succeeded. It has done exactly that.
+        try:
+            run("scrape_ebird.py")
+            run("backfill_locations.py")
+        finally:
+            run("sync_db.py", "push")
 
     left = [d for d in wanted if d not in already_have()]
     print(f"\ndone. {len(left)} days of the range still missing.")
