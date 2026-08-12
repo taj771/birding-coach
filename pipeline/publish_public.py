@@ -95,7 +95,7 @@ def build(models, names):
     src = DATA / "photos.json"
     if src.exists():
         raw = json.loads(src.read_text())
-        photos = {sp: {k: v for k, v in e.items() if k in ("months", "female")}
+        photos = {sp: {k: v for k, v in e.items() if k in ("main", "months", "female")}
                   for sp, e in raw.items() if e.get("months")}
         (BUNDLE / "photos.json").write_text(json.dumps(photos, separators=(",", ":")))
 
