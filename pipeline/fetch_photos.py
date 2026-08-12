@@ -39,6 +39,13 @@ INAT = "https://api.inaturalist.org/v1"
 PAUSE = 0.6          # iNaturalist asks for no more than 100 requests a minute
 SEX_FEMALE = {"term_id": 9, "term_value_id": 10}
 
+# iNaturalist serves photos whatever licence the photographer chose, and a null
+# license_code means all rights reserved. Those must not be displayed, so the
+# filter is applied in the request rather than after — otherwise the best-voted
+# photo is usually the one we cannot use, and we would fall back to nothing.
+# ND is included: showing a photo unaltered is not a derivative work.
+USABLE = "cc0,cc-by,cc-by-sa,cc-by-nd,cc-by-nc,cc-by-nc-sa,cc-by-nc-nd"
+
 
 def ebird_names(codes):
     """species_code -> scientific name, from the eBird taxonomy."""
@@ -70,7 +77,7 @@ def photo_for(taxon_id, **filters):
     """Best-voted research-grade observation photo matching the filters."""
     params = {"taxon_id": taxon_id, "photos": "true",
               "quality_grade": "research", "order_by": "votes",
-              "per_page": 1, **filters}
+              "photo_license": USABLE, "per_page": 1, **filters}
     r = requests.get(f"{INAT}/observations", params=params, timeout=30)
     time.sleep(PAUSE)
     if not r.ok:
@@ -79,6 +86,10 @@ def photo_for(taxon_id, **filters):
     if not results or not results[0].get("photos"):
         return None
     p = results[0]["photos"][0]
+    # belt and braces: the filter should make this impossible, but a photo with
+    # no licence must never reach the app
+    if not p.get("license_code"):
+        return None
     return {
         # iNaturalist serves sizes by filename; square is the default in the
         # response and far too small for a grid
