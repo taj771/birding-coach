@@ -95,8 +95,11 @@ def build(models, names):
     src = DATA / "photos.json"
     if src.exists():
         raw = json.loads(src.read_text())
-        photos = {sp: {k: v for k, v in e.items() if k in ("main", "months", "female")}
-                  for sp, e in raw.items() if e.get("months")}
+        # Only the curated photo is published. The grid shows one picture per
+        # species; month and female variants are kept in data/photos.json so
+        # they can be added back without refetching nine hundred images.
+        photos = {sp: {"main": e["main"][:1]}
+                  for sp, e in raw.items() if e.get("main")}
         (BUNDLE / "photos.json").write_text(json.dumps(photos, separators=(",", ":")))
 
     (BUNDLE / "species.json").write_text(json.dumps(
