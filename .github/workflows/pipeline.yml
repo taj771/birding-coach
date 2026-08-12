@@ -25,6 +25,14 @@ on:
         description: 'backfill only — last date, e.g. 2025-11-01'
         default: ''
 
+# Two runs at once would both pull the shared database, scrape different days,
+# and push — and whichever finished second would overwrite the other's work.
+# Queue rather than cancel: a run already part-way through has days worth
+# keeping, and it pushes them as it goes.
+concurrency:
+  group: birding-pipeline
+  cancel-in-progress: false
+
 jobs:
   pipeline:
     runs-on: ubuntu-latest
