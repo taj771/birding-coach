@@ -22,7 +22,7 @@ Those two turn out to be the largest measurable effects in the data.
 
 ## What the data says
 
-4,207 complete checklists, 48 days, 1,039 sites, 69 species modelled.
+8,129 complete checklists, 79 days, 2,062 sites, 73 species modelled.
 
 | | |
 |---|---|
@@ -68,8 +68,8 @@ whether an effect is *real* need the unpenalised fit, which is a separate job.
 ### Two evaluations, because there are two questions
 
 ```
-new site   AUC 0.72, calibration MAE 0.038    somewhere never visited
-new day    AUC 0.79, calibration MAE 0.030    a known hotspot, future date
+new site   AUC 0.727, calibration MAE 0.030   somewhere never visited
+new day    AUC 0.801, calibration MAE 0.026   a known hotspot, future date
 ```
 
 Held out by site and by date respectively. The second is what the app actually
