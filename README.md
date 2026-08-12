@@ -8,6 +8,10 @@ birders have historically reported at those spots.
 
 Study region is **Allegheny County, Pennsylvania**.
 
+**New here?** [OVERVIEW.md](OVERVIEW.md) explains the whole system — the three
+repositories, how a checklist becomes a number on a phone, and why it is built
+this way. This README goes deeper on the model alone.
+
 ## Why the gap exists
 
 Traveling Birder, BirdTrip, BirdPlan and eBird's own Hotspot Explorer all take
