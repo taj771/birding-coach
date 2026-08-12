@@ -73,6 +73,42 @@ def inat_taxon(scientific):
     return None
 
 
+def clean(p):
+    """iNaturalist photo -> the fields we publish, or None if unusable."""
+    if not p.get("license_code"):
+        return None
+    return {
+        # iNaturalist serves sizes by filename; square is the default in the
+        # response and far too small for a grid
+        "url": p["url"].replace("/square.", "/medium."),
+        "licence": p.get("license_code"),
+        # attribution strings occasionally contain a stray newline
+        "attribution": " ".join((p.get("attribution") or "").split()),
+    }
+
+
+def curated(taxon_id):
+    """The taxon's own photos, which the iNaturalist community picks as
+    representative of the species.
+
+    These are the reliable ones. An observation photo is whatever somebody
+    happened to take — often distant, blurred, or a dramatic pose rather than a
+    diagnostic one — and with most observations having no votes at all, ordering
+    by votes barely discriminates between thousands of them. Taxon photos have
+    been chosen by people for the purpose of showing what the bird looks like.
+    """
+    r = requests.get(f"{INAT}/taxa/{taxon_id}", timeout=30)
+    time.sleep(PAUSE)
+    if not r.ok or not r.json().get("results"):
+        return []
+    out = []
+    for tp in (r.json()["results"][0].get("taxon_photos") or []):
+        got = clean(tp.get("photo") or {})
+        if got:
+            out.append(got)
+    return out[:3]
+
+
 def photo_for(taxon_id, **filters):
     """Best-voted research-grade observation photo matching the filters."""
     params = {"taxon_id": taxon_id, "photos": "true",
@@ -85,18 +121,9 @@ def photo_for(taxon_id, **filters):
     results = r.json().get("results") or []
     if not results or not results[0].get("photos"):
         return None
-    p = results[0]["photos"][0]
-    # belt and braces: the filter should make this impossible, but a photo with
-    # no licence must never reach the app
-    if not p.get("license_code"):
-        return None
-    return {
-        # iNaturalist serves sizes by filename; square is the default in the
-        # response and far too small for a grid
-        "url": p["url"].replace("/square.", "/medium."),
-        "licence": p.get("license_code"),
-        "attribution": p.get("attribution"),
-    }
+    # belt and braces: the filter should make an unlicensed photo impossible
+    # here, but clean() rejects one anyway rather than trusting the parameter
+    return clean(results[0]["photos"][0])
 
 
 if __name__ == "__main__":
@@ -121,6 +148,10 @@ if __name__ == "__main__":
             print(f"[{i}/{len(codes)}] {info['com']}: no iNaturalist match")
             continue
 
+        if not entry.get("main"):
+            entry["main"] = curated(entry["taxon_id"])
+            calls += 1
+
         months = entry.setdefault("months", {})
         missing = [m for m in range(1, 13) if str(m).zfill(2) not in months]
         for m in missing:
@@ -136,7 +167,7 @@ if __name__ == "__main__":
                 entry["female"] = female
 
         print(f"[{i}/{len(codes)}] {info['com']:32} "
-              f"{len(months)}/12 months"
+              f"{len(entry.get('main') or [])} curated, {len(months)}/12 months"
               f"{'  + female' if entry.get('female') else ''}", flush=True)
         OUT.write_text(json.dumps(cache, separators=(",", ":")))   # save as we go
 
