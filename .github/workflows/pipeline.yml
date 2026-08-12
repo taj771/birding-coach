@@ -17,6 +17,13 @@ on:
           - daily            # scrape recent checklists
           - monthly          # refit and publish
           - all              # both
+          - backfill         # scrape a past date range, to fill calendar gaps
+      start:
+        description: 'backfill only — first date, e.g. 2025-08-25'
+        default: ''
+      end:
+        description: 'backfill only — last date, e.g. 2025-11-01'
+        default: ''
 
 jobs:
   pipeline:
@@ -131,7 +138,21 @@ jobs:
             [ "$(date -u +%H)" = "09" ] && MODE=monthly || MODE=daily
           fi
           echo "mode: $MODE"
-          python -u pipeline/run.py "$MODE"
+
+          if [ "$MODE" = "backfill" ]; then
+            START="${{ inputs.start }}"
+            END="${{ inputs.end }}"
+            if [ -z "$START" ] || [ -z "$END" ]; then
+              echo "::error::backfill needs both start and end dates."
+              exit 1
+            fi
+            # --max-days keeps a run inside the job timeout. The script skips
+            # days already stored, so running it again continues where it
+            # stopped rather than starting over.
+            python -u pipeline/backfill.py "$START" "$END" --max-days 200
+          else
+            python -u pipeline/run.py "$MODE"
+          fi
 
       - name: keep the coefficients as an artifact
         uses: actions/upload-artifact@v4

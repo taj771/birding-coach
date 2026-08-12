@@ -76,9 +76,16 @@ def build(models, names):
         shutil.rmtree(BUNDLE)
     (BUNDLE / "coef").mkdir(parents=True)
 
-    for sp, m in models.items():
+    flattened = {sp: flat(m) for sp, m in models.items()}
+    for sp, terms in flattened.items():
         (BUNDLE / "coef" / f"{sp}.json").write_text(
-            json.dumps(flat(m), separators=(",", ":")))
+            json.dumps(terms, separators=(",", ":")))
+
+    # Every species in one file, for the log form: ranking which birds are
+    # likely at a spot means scoring all of them, and 69 separate requests to
+    # do it once is worse than a single 200 KB one that the CDN then caches.
+    # The forecast still fetches one species at a time — it only ever needs one.
+    (BUNDLE / "all.json").write_text(json.dumps(flattened, separators=(",", ":")))
 
     (BUNDLE / "species.json").write_text(json.dumps(
         sorted(({"species_code": sp, "common_name": names.get(sp, sp)}
