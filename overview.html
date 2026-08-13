@@ -1,0 +1,711 @@
+<title>Birding Coach — how it works</title>
+
+<style>
+  :root {
+    --ink:      #1B2420;
+    --paper:    #F2F2EE;
+    --surface:  #E9EAE3;
+    --moss:     #3F6B4F;
+    --moss-dim: #8FA898;
+    --ochre:    #B07C22;
+    --slate:    #6B7A76;
+    --rule:     #D6D8CF;
+    --blank:    #DDDFD6;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+    --col: 34rem;
+    --wide: 60rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink:      #E4E7E0;
+      --paper:    #121715;
+      --surface:  #1B211E;
+      --moss:     #7FA98C;
+      --moss-dim: #486054;
+      --ochre:    #D9A94E;
+      --slate:    #8C9A95;
+      --rule:     #2A322E;
+      --blank:    #232A26;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ink:      #E4E7E0;
+    --paper:    #121715;
+    --surface:  #1B211E;
+    --moss:     #7FA98C;
+    --moss-dim: #486054;
+    --ochre:    #D9A94E;
+    --slate:    #8C9A95;
+    --rule:     #2A322E;
+    --blank:    #232A26;
+  }
+
+  :root[data-theme="light"] {
+    --ink:      #1B2420;
+    --paper:    #F2F2EE;
+    --surface:  #E9EAE3;
+    --moss:     #3F6B4F;
+    --moss-dim: #8FA898;
+    --ochre:    #B07C22;
+    --slate:    #6B7A76;
+    --rule:     #D6D8CF;
+    --blank:    #DDDFD6;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.25rem 6rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3.25rem;
+  }
+
+  /* Every direct child centres on the reading column; figures opt out. */
+  body > * { width: 100%; max-width: var(--col); }
+  body > .wide { max-width: var(--wide); }
+
+  p { margin: 0 0 1.05em; text-wrap: pretty; }
+  p:last-child { margin-bottom: 0; }
+
+  h1, h2, h3 { font-family: var(--serif); text-wrap: balance; margin: 0; font-weight: 600; }
+  h1 { font-size: clamp(2.1rem, 6vw, 3.1rem); line-height: 1.08; letter-spacing: -0.015em; }
+  h2 { font-size: 1.6rem; line-height: 1.2; letter-spacing: -0.01em; }
+  h3 { font-size: 1.075rem; line-height: 1.3; }
+
+  a { color: inherit; text-decoration-color: var(--moss-dim); text-underline-offset: 0.18em; }
+  a:hover { text-decoration-color: var(--ochre); }
+  a:focus-visible {
+    outline: 2px solid var(--ochre);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code { font-family: var(--mono); font-size: 0.86em; }
+  strong { font-weight: 600; }
+
+  .eyebrow {
+    font-family: var(--sans);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--moss);
+    margin: 0;
+  }
+
+  .lede { font-size: 1.2rem; line-height: 1.5; color: var(--ink); }
+  .note { font-family: var(--sans); font-size: 0.82rem; line-height: 1.5; color: var(--slate); }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { display: flex; flex-direction: column; gap: 1rem; padding-top: 4rem; }
+  .masthead h1 { margin-top: 0.35rem; }
+  .byline {
+    font-family: var(--sans);
+    font-size: 0.8rem;
+    color: var(--slate);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 0.85rem;
+  }
+
+  /* The one claim the whole method depends on, marked where it is stated. */
+  .hl { color: var(--ochre); font-weight: 600; }
+
+  /* ---------- section headers ---------- */
+
+  .act { display: flex; flex-direction: column; gap: 0.5rem; }
+  .act .eyebrow { color: var(--ochre); }
+  .act::after { content: ""; height: 1px; background: var(--rule); margin-top: 0.9rem; }
+
+  /* ---------- repositories ---------- */
+
+  .repos { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  @media (min-width: 46rem) { .repos { grid-template-columns: repeat(3, 1fr); } }
+
+  .repo {
+    background: var(--paper);
+    padding: 1.15rem 1.25rem 1.35rem;
+    display: flex; flex-direction: column; gap: 0.5rem;
+  }
+  .repo .path { font-family: var(--mono); font-size: 0.83rem; font-weight: 600; }
+  .repo .vis {
+    font-family: var(--sans); font-size: 0.63rem; font-weight: 700;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    align-self: flex-start; padding: 0.2rem 0.45rem; border: 1px solid currentColor;
+  }
+  .repo .vis.pub { color: var(--moss); }
+  .repo .vis.priv { color: var(--ochre); }
+  .repo .vis.loc { color: var(--slate); }
+  .repo p { font-family: var(--sans); font-size: 0.85rem; line-height: 1.5; color: var(--slate); margin: 0; }
+
+  /* ---------- pipeline ---------- */
+
+  .flow { display: grid; gap: 0; }
+  .step {
+    display: grid;
+    grid-template-columns: 2.4rem 1fr;
+    gap: 1rem;
+    padding: 0.95rem 0;
+    border-top: 1px solid var(--rule);
+    align-items: start;
+  }
+  .step:last-child { border-bottom: 1px solid var(--rule); }
+  .step .num {
+    font-family: var(--mono); font-size: 0.78rem; font-weight: 600;
+    color: var(--moss); padding-top: 0.28rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .step h3 { font-family: var(--sans); font-size: 0.95rem; font-weight: 600; }
+  .step p { font-family: var(--sans); font-size: 0.855rem; line-height: 1.55; color: var(--slate); margin: 0.25rem 0 0; }
+  .step.split { background: var(--surface); margin: 0 -0.9rem; padding-left: 0.9rem; padding-right: 0.9rem; }
+  .step.split .num { color: var(--ochre); }
+
+  /* ---------- licence split ---------- */
+
+  .split-pair { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  @media (min-width: 40rem) { .split-pair { grid-template-columns: 1fr 1fr; } }
+  .half { background: var(--paper); padding: 1.15rem 1.25rem 1.3rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .half .eyebrow { font-size: 0.64rem; }
+  .half.private .eyebrow { color: var(--ochre); }
+  .half p { font-family: var(--sans); font-size: 0.855rem; line-height: 1.55; color: var(--slate); margin: 0; }
+  .half .what { font-family: var(--mono); font-size: 0.82rem; color: var(--ink); }
+
+  /* ---------- model terms ---------- */
+
+  .terms { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .term { background: var(--paper); padding: 0.9rem 1.1rem; display: grid; gap: 0.3rem; }
+  @media (min-width: 40rem) {
+    .term { grid-template-columns: 8rem 1fr; gap: 0.3rem 1.25rem; align-items: baseline; }
+  }
+  .term dt { font-family: var(--sans); font-size: 0.88rem; font-weight: 600; }
+  .term dd { margin: 0; font-family: var(--sans); font-size: 0.845rem; line-height: 1.5; color: var(--slate); }
+  .term dd .vars { font-family: var(--mono); font-size: 0.79rem; color: var(--ink); display: block; margin-bottom: 0.2rem; }
+  .term.tested { background: var(--surface); }
+  .term.tested dt { color: var(--ochre); }
+
+  /* ---------- statistics band ---------- */
+
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  @media (min-width: 46rem) { .stats { grid-template-columns: repeat(4, 1fr); } }
+  .stat { background: var(--paper); padding: 1.15rem 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  .stat .n {
+    font-family: var(--sans); font-size: 1.75rem; font-weight: 600;
+    letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .stat .k { font-family: var(--sans); font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--slate); }
+  .stat .sub { font-family: var(--sans); font-size: 0.78rem; color: var(--slate); }
+
+  /* ---------- evaluation ---------- */
+
+  .evals { display: grid; gap: 1rem; }
+  @media (min-width: 40rem) { .evals { grid-template-columns: 1fr 1fr; } }
+  .eval { border: 1px solid var(--rule); padding: 1.1rem 1.2rem 1.3rem; display: flex; flex-direction: column; gap: 0.7rem; }
+  .eval.primary { border-color: var(--moss); }
+  .eval .q { font-family: var(--sans); font-size: 0.855rem; line-height: 1.45; color: var(--slate); margin: 0; }
+  .metric { display: flex; align-items: baseline; gap: 0.5rem; }
+  .metric .v { font-family: var(--sans); font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .metric .l { font-family: var(--sans); font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--slate); }
+  .bar { height: 5px; background: var(--blank); position: relative; overflow: hidden; }
+  .bar > span { position: absolute; inset: 0 auto 0 0; background: var(--moss-dim); }
+  .eval.primary .bar > span { background: var(--moss); }
+
+  /* ---------- coverage strips ---------- */
+
+  .strip-block { display: flex; flex-direction: column; gap: 0.6rem; }
+  .strip { display: grid; gap: 2px; }
+  .weeks { grid-template-columns: repeat(52, 1fr); }
+  .hours { grid-template-columns: repeat(24, 1fr); }
+  .strip i { display: block; height: 2.1rem; background: var(--blank); }
+  .strip i.on { background: var(--moss); }
+  .scale {
+    display: grid; gap: 2px;
+    font-family: var(--sans); font-size: 0.66rem; letter-spacing: 0.06em;
+    color: var(--slate);
+  }
+  .scale.months { grid-template-columns: repeat(12, 1fr); }
+  .scale.hourly { grid-template-columns: repeat(4, 1fr); }
+  .scale span { text-align: left; }
+
+  /* ---------- limits ---------- */
+
+  .limits { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.85rem; }
+  .limits li { display: grid; grid-template-columns: 0.9rem 1fr; gap: 0.75rem; align-items: baseline; }
+  .limits li::before {
+    content: ""; width: 0.55rem; height: 0.55rem;
+    border: 1px solid var(--ochre); background: var(--blank);
+    transform: translateY(0.05rem);
+  }
+  .limits b { font-weight: 600; }
+
+  .todo { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.85rem; }
+  .todo li { display: grid; grid-template-columns: 1.15rem 1fr; gap: 0.75rem; align-items: baseline; }
+  .todo li::before {
+    content: ""; width: 1.05rem; height: 1.05rem;
+    border: 1px dashed var(--moss-dim); background: transparent;
+    transform: translateY(0.15rem);
+  }
+
+  .colophon {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.25rem;
+    font-family: var(--sans); font-size: 0.78rem; line-height: 1.6; color: var(--slate);
+    display: flex; flex-direction: column; gap: 0.6rem;
+  }
+
+  /* The masthead settles in on load — the page's one piece of motion. */
+  @media (prefers-reduced-motion: no-preference) {
+    .masthead > * { animation: settle 0.55s ease-out backwards; }
+    .masthead > *:nth-child(1) { animation-delay: 0.04s; }
+    .masthead > *:nth-child(2) { animation-delay: 0.10s; }
+    .masthead > *:nth-child(3) { animation-delay: 0.18s; }
+    .masthead > *:nth-child(4) { animation-delay: 0.26s; }
+    @keyframes settle { from { opacity: 0; transform: translateY(5px); } }
+  }
+
+  /* ---------- print ----------
+     Last in the file on purpose. These rules have the same specificity as the
+     ones they override, so they win on source order alone — placed earlier,
+     the load animation kept its `backwards` fill and printed the masthead as
+     a blank third of a page. */
+
+  @media print {
+    /* Force the light palette. A reader printing from a dark-themed browser
+       would otherwise get solid ink across every page. */
+    :root, :root[data-theme="dark"], :root[data-theme="light"] {
+      --ink:      #1B2420;
+      --paper:    #FFFFFF;
+      --surface:  #F2F2EE;
+      --moss:     #33573F;
+      --moss-dim: #8FA898;
+      --ochre:    #8F6316;
+      --slate:    #5A6764;
+      --rule:     #C9CCC2;
+      --blank:    #E4E6DE;
+    }
+
+    @page { margin: 15mm 14mm; }
+
+    /* Without this the browser drops every background fill, which would take
+       the two coverage strips with it — they are nothing but background. */
+    body {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      padding: 0;
+      gap: 1.9rem;
+      font-size: 10.5pt;
+    }
+    body > *, body > .wide { max-width: 100%; }
+
+    .masthead { padding-top: 0; }
+    .masthead > * { animation: none; opacity: 1; transform: none; }
+
+    h1 { font-size: 25pt; }
+    h2 { font-size: 15pt; }
+
+    /* Nothing that reads as a single object should be split down the middle. */
+    .repo, .stat, .eval, .step, .term, .half, .strip-block,
+    .limits li, .todo li, .colophon { break-inside: avoid; }
+    .act, h2, h3 { break-after: avoid; }
+
+    /* A URL is only useful on paper if it is written out — unless the link
+       text is already the URL, which is the byline's case. */
+    a { text-decoration: none; }
+    .byline a::after { content: none; }
+    a[href^="http"]::after {
+      content: " (" attr(href) ")";
+      font-size: 0.72em;
+      color: var(--slate);
+      word-break: break-all;
+    }
+  }
+</style>
+
+<header class="masthead">
+  <p class="eyebrow">Allegheny County, Pennsylvania</p>
+  <h1>Every birding app tells you <em>where</em>. This one tells you <em>when</em>.</h1>
+  <p class="lede">
+    Pick a species, a hotspot, and a day in the coming week. It returns the
+    probability you would actually see that bird, hour by hour — the weather
+    forecast applied to what birders have historically reported at that spot.
+  </p>
+  <p class="byline">
+    <span>Tharaka Jayalath</span>
+    <span>12 August 2026</span>
+    <span>8,129 checklists · 73 species</span>
+    <span><a href="https://github.com/taj771/birding-coach">github.com/taj771/birding-coach</a></span>
+  </p>
+</header>
+
+<section class="act">
+  <p class="eyebrow">One</p>
+  <h2>The idea the whole thing rests on</h2>
+</section>
+
+<section>
+  <p>
+    eBird lets a birder mark a checklist <strong>complete</strong> — a
+    declaration that they listed every species they could identify. On a complete
+    checklist, a species that does <em>not</em> appear is
+    <b class="hl">evidence the bird was not detected</b>. It is not missing data.
+    It is a verified zero.
+  </p>
+  <p>
+    That is what makes a probability computable. A pile of sightings gives you a
+    numerator and nothing else. Complete checklists give you the denominator: out
+    of 412 complete lists submitted at Frick Park in week 31, how many contained
+    a Wood Thrush? Now you can divide.
+  </p>
+  <p>
+    Every design decision downstream follows from protecting that zero. Only
+    complete checklists enter the fit. The app's own <em>“I listed everything”</em>
+    box is a claim recorded honestly, never a required checkbox — a gate on the
+    save button does not produce complete checklists, it produces people ticking
+    a box to get past it. And a bird picked from photographs is flagged
+    <code>uncertain</code>, because a wrong species also makes every absence
+    around it wrong.
+  </p>
+</section>
+
+<section class="act">
+  <p class="eyebrow">Two</p>
+  <h2>How it is built</h2>
+</section>
+
+<section>
+  <p>
+    Three repositories, genuinely separate. The two project directories sit
+    inside the coursework directory on disk but are not part of its git
+    repository — adding them from the parent creates a broken pointer and
+    quietly detaches the project.
+  </p>
+</section>
+
+<div class="repos wide">
+  <article class="repo">
+    <span class="vis pub">Public</span>
+    <span class="path">02-birding-coach</span>
+    <p>Python. Scrapes eBird, fits the model, publishes coefficients.</p>
+  </article>
+  <article class="repo">
+    <span class="vis priv">Private</span>
+    <span class="path">03-birding-coach-app</span>
+    <p>React and TanStack Start. What a user sees. Reads the published coefficients.</p>
+  </article>
+  <article class="repo">
+    <span class="vis loc">Local only</span>
+    <span class="path">AI_certificate</span>
+    <p>No remote. Bootcamp coursework wrapper that the other two happen to sit inside.</p>
+  </article>
+</div>
+
+<section>
+  <h3 style="font-family: var(--sans); margin-bottom: 0.75rem;">From a sighting to a number on a phone</h3>
+</section>
+
+<div class="flow">
+  <div class="step">
+    <span class="num">01</span>
+    <div>
+      <h3>Scrape</h3>
+      <p>eBird API 2.0, two calls per checklist — one for the day's feed, one for
+      each checklist's contents. There is no bulk endpoint. Scraping deliberately
+      lags seven days: submissions trail the outing, and scraping fresh captures
+      only the people who log in the field.</p>
+    </div>
+  </div>
+  <div class="step">
+    <span class="num">02</span>
+    <div>
+      <h3>Store</h3>
+      <p>A DuckDB file that is never committed. Both a laptop and a CI runner
+      write to it, so syncing merges by natural key rather than overwriting —
+      running it twice adds nothing.</p>
+    </div>
+  </div>
+  <div class="step split">
+    <span class="num">03</span>
+    <div>
+      <h3>Split — the licensing boundary</h3>
+      <p>eBird records must not be redistributed in raw form. A fitted
+      coefficient is derived work: a number describing a pattern, not a copy of
+      anybody's checklist. So the two go to different places.</p>
+    </div>
+  </div>
+  <div class="step">
+    <span class="num">04</span>
+    <div>
+      <h3>Fit</h3>
+      <p>One ridge logistic regression per species, refitted monthly. New
+      checklists arrive continuously; how detection responds to hour, effort and
+      weather does not move week to week.</p>
+    </div>
+  </div>
+  <div class="step">
+    <span class="num">05</span>
+    <div>
+      <h3>Serve</h3>
+      <p>The fitted model is a lookup table plus a sum, so the app needs no
+      Python and no server. Roughly 200 lines of TypeScript score it in the
+      browser, against a weather forecast fetched at request time.</p>
+    </div>
+  </div>
+</div>
+
+<div class="split-pair wide">
+  <div class="half private">
+    <p class="eyebrow">Private dataset</p>
+    <p class="what">raw eBird checklists</p>
+    <p>Licensed, not redistributable. Reached only by the pipeline, with a
+    write token held in CI secrets.</p>
+  </div>
+  <div class="half">
+    <p class="eyebrow">Public dataset</p>
+    <p class="what">fitted coefficients only</p>
+    <p>Numbers, no records. Fetched straight from a CDN — which means the
+    browser needs no credentials at all. No token in the front-end bundle, no
+    proxy server, no auth layer in front of the model.</p>
+  </div>
+</div>
+
+<section>
+  <h3 style="font-family: var(--sans); margin-bottom: 0.4rem;">What the model estimates</h3>
+  <p class="note" style="margin-bottom: 1rem;">
+    P(reported | hour, week, site, effort, weather) — one ridge logistic
+    regression per species.
+  </p>
+</section>
+
+<dl class="terms wide" style="margin: 0;">
+  <div class="term">
+    <dt>Effort</dt>
+    <dd><span class="vars">duration · distance · observers · travelling</span>
+    How hard you looked. The largest effect in the data — and not optional. Rain
+    makes birders cut a walk short <em>and</em> makes birds quieter. Leave effort
+    out and the rain coefficient silently absorbs both, so you would publish
+    “rain lowers your chances” when half of that is “rain shortened your walk”.</dd>
+  </div>
+  <div class="term">
+    <dt>Time of day</dt>
+    <dd><span class="vars">one term per hour, 06:00–20:00</span>
+    Dawn chorus and the midday lull. Strongly species-dependent — generic
+    “go early” advice underdelivers.</dd>
+  </div>
+  <div class="term">
+    <dt>Season</dt>
+    <dd><span class="vars">one term per week of the year</span>
+    Migration, breeding song, winter absence. Indexed by day-of-year rather than
+    date, so last August's checklists inform this August.</dd>
+  </div>
+  <div class="term">
+    <dt>Site</dt>
+    <dd><span class="vars">one term per hotspot</span>
+    Habitat, compressed into a single number. Ridge shrinkage is what makes this
+    possible: a site visited 89 times keeps its own estimate, one visited four
+    times is pulled toward the county average.</dd>
+  </div>
+  <div class="term tested">
+    <dt>Weather</dt>
+    <dd><span class="vars">wind · temperature · precipitation · cloud</span>
+    Kept as a separable block, because it is the thing actually under test.</dd>
+  </div>
+</dl>
+
+<section>
+  <p class="note">
+    Ridge rather than ordinary logistic regression because the fit otherwise
+    separates — a site where the bird was seen on all four of its visits gets an
+    infinite coefficient, and roughly half the species were lost that way once
+    site effects were added. The cost is inference: ridge coefficients are biased
+    on purpose, so there are no valid p-values here. Acceptable, because the app
+    needs point predictions rather than significance tests.
+  </p>
+</section>
+
+<div class="stats wide">
+  <div class="stat">
+    <span class="n">8,129</span>
+    <span class="k">Checklists</span>
+    <span class="sub">complete lists only</span>
+  </div>
+  <div class="stat">
+    <span class="n">73</span>
+    <span class="k">Species</span>
+    <span class="sub">101,553 observations</span>
+  </div>
+  <div class="stat">
+    <span class="n">192</span>
+    <span class="k">Hotspots</span>
+    <span class="sub">of 2,062 sites scraped</span>
+  </div>
+  <div class="stat">
+    <span class="n">79</span>
+    <span class="k">Days</span>
+    <span class="sub">Jan 2025 – Aug 2026</span>
+  </div>
+</div>
+
+<section>
+  <h3 style="font-family: var(--sans); margin-bottom: 0.4rem;">Two evaluations, because there are two questions</h3>
+  <p class="note" style="margin-bottom: 1.1rem;">
+    Never a random split — checklists from the same trip would leak across it.
+    Medians across all 73 species. The bars run from 0.5, since an AUC of 0.5 is
+    a coin flip, not zero.
+  </p>
+</section>
+
+<div class="evals wide">
+  <div class="eval">
+    <p class="eyebrow">Held out by site</p>
+    <p class="q">A place the model has never seen. Harder, and not what the app does.</p>
+    <div class="metric"><span class="v">0.727</span><span class="l">median AUC</span></div>
+    <div class="bar"><span style="width: 45.4%;"></span></div>
+    <div class="metric"><span class="v">0.030</span><span class="l">calibration MAE</span></div>
+  </div>
+  <div class="eval primary">
+    <p class="eyebrow">Held out by date</p>
+    <p class="q">A known hotspot, on a future day. This is what the app actually does.</p>
+    <div class="metric"><span class="v">0.801</span><span class="l">median AUC</span></div>
+    <div class="bar"><span style="width: 60.2%;"></span></div>
+    <div class="metric"><span class="v">0.026</span><span class="l">calibration MAE</span></div>
+  </div>
+</div>
+
+<section>
+  <p>
+    The gap between those two is the evidence that site effects carry real
+    information. Testing only by site would have hidden it completely, since a
+    site the model has never seen cannot benefit from site effects by
+    construction.
+  </p>
+  <p>
+    Calibration matters more here than AUC. AUC asks whether the ranking is
+    right; a calibration error of 0.026 says that when the app tells you 40%, the
+    true rate is close to 40%. A ranking that is never honest about magnitude is
+    little use to someone deciding whether to get up at five.
+  </p>
+</section>
+
+<section class="act">
+  <p class="eyebrow">Three</p>
+  <h2>What it cannot do</h2>
+</section>
+
+<section>
+  <p>
+    The most useful thing this section can be is accurate. Two coverage gaps are
+    visible in the data itself.
+  </p>
+</section>
+
+<div class="strip-block wide">
+  <p class="eyebrow" style="color: var(--slate);">Weeks of the year with a fitted seasonal term — 18 of 52</p>
+  <div class="strip weeks" role="img" aria-label="Coverage across the 52 weeks of the year: 18 weeks are fitted, concentrated in late spring and summer; autumn and winter are largely absent.">
+    <i></i><i></i><i></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i></i><i></i>
+    <i class="on"></i><i></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i>
+    <i class="on"></i><i></i><i></i><i></i><i class="on"></i><i></i><i></i><i class="on"></i><i class="on"></i><i class="on"></i>
+    <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i class="on"></i><i></i><i></i><i></i><i class="on"></i><i></i>
+    <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    <i></i><i></i>
+  </div>
+  <div class="scale months">
+    <span>Jan</span><span>Feb</span><span>Mar</span><span>Apr</span><span>May</span><span>Jun</span>
+    <span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span><span>Dec</span>
+  </div>
+  <p class="note">
+    Ask about a week with no term and the model has nothing seasonal to say — so
+    the app reports that rather than guessing. Closing this is what the backfill
+    is for, and it has not finished. Autumn migration is the conspicuous
+    absence.
+  </p>
+</div>
+
+<div class="strip-block wide">
+  <p class="eyebrow" style="color: var(--slate);">Hours of the day with a fitted term — 06:00 to 20:00</p>
+  <div class="strip hours" role="img" aria-label="Coverage across the 24 hours of the day: hours 6 through 20 are fitted; night hours are not.">
+    <i></i><i></i><i></i><i></i><i></i><i></i>
+    <i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i>
+    <i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i>
+    <i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i>
+  </div>
+  <div class="scale hourly">
+    <span>00</span><span>06</span><span>12</span><span>18</span>
+  </div>
+  <p class="note">
+    Owling and nocturnal migration are outside what this can answer. Few enough
+    checklists are submitted at night that a term would be fitted on almost
+    nothing.
+  </p>
+</div>
+
+<section>
+  <h3 style="font-family: var(--sans); margin-bottom: 1rem;">Stated limits</h3>
+  <ul class="limits">
+    <li><span><b>Detection, not presence.</b> This predicts whether you would
+    <em>report</em> a bird, not whether one is there. For a birder that is the
+    right target. It is not the same quantity, and the distinction matters to
+    anyone reading these numbers ecologically.</span></li>
+    <li><span><b>One county</b> — an arithmetic constraint, not a preference.
+    Building a denominator costs two API calls per checklist: about 4,650 for a
+    month of one county, roughly 438,000 for a year of Pennsylvania, over a
+    million for a month of the United States.</span></li>
+    <li><span><b>Effort is endogenous.</b> Birders extend a good outing, so
+    duration is partly a consequence of success rather than only a cause. The
+    effort coefficient is inflated by an unknown amount.</span></li>
+    <li><span><b>Weather sits on a 25 km grid</b>, which attenuates its
+    coefficients toward zero. The wind effect is probably understated.</span></li>
+    <li><span><b>Observers self-select on weather.</b> Nobody birds in a storm,
+    so the observed weather range is truncated and whoever does go out is
+    unusual.</span></li>
+    <li><span><b>The eBird feed truncates</b> any county-day above 200
+    checklists, under-sampling exactly the busiest spring mornings.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h3 style="font-family: var(--sans); margin-bottom: 1rem;">Not yet built</h3>
+  <ul class="todo">
+    <li><span><b>The leaderboard.</b> Described in the brief, and display names
+    are already collected for it. Nothing renders it.</span></li>
+    <li><span><b>Photo upload.</b> Deliberately deferred — storing images is
+    easy, reviewing them is not, and an unreviewed upload path is a moderation
+    problem waiting.</span></li>
+    <li><span><b>An unkept promise.</b> The sign-in page tells users their
+    checklists improve the forecast. Nothing currently carries app-logged
+    sightings back into the pipeline. Either build the path or change the copy —
+    leaving both is the worst option.</span></li>
+  </ul>
+</section>
+
+<footer class="colophon">
+  <p>
+    Bird records from the <strong>eBird API 2.0</strong>, Cornell Lab of
+    Ornithology — free for non-commercial use, must be cited, and not
+    redistributable in raw form. No eBird records appear in the public
+    repository.
+  </p>
+  <p>
+    Weather is ERA5 reanalysis and forecasts from <strong>Open-Meteo</strong>.
+    Identification photographs are contributed to <strong>iNaturalist</strong>
+    under Creative Commons licences and are attributed individually in the app.
+  </p>
+  <p>
+    Figures on this page are the fit published 12 August 2026.
+  </p>
+</footer>
