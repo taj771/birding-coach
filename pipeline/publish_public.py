@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,6 +61,55 @@ def flat(m):
         for k, v in (meta.get(split) or {}).items():
             out[f"meta_{split}_{k}"] = float(v)
     return out
+
+
+def species_names(codes):
+    """species_code -> common name, derived rather than read from disk.
+
+    This used to load data/species_names.json, which nothing in the pipeline
+    ever wrote — it was a file made by hand on a laptop. data/ is gitignored,
+    so a CI runner reached the last step of a ten-minute refit and died on a
+    missing 2 KB file. The local copy was also stale: 69 names against a model
+    that had grown to 89 species.
+
+    fetch_photos.py already resolves a common name for every fitted species
+    and runs earlier in the same job, so the names are on disk by the time we
+    get here. The eBird taxonomy fills anything it missed, and the file is
+    written back afterwards so the local preview tool still finds one.
+    """
+    names = {}
+
+    photos = DATA / "photos.json"
+    if photos.exists():
+        for sp, e in json.loads(photos.read_text()).items():
+            if e.get("common_name"):
+                names[sp] = e["common_name"]
+
+    missing = [c for c in codes if c not in names]
+    if missing and os.getenv("EBIRD_API_KEY"):
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            import ebird_api
+            taxa = ebird_api.get("/ref/taxonomy/ebird", fmt="json",
+                                 species=",".join(missing)) or []
+            for t in taxa:
+                if t.get("speciesCode") and t.get("comName"):
+                    names[t["speciesCode"]] = t["comName"]
+        except Exception as e:
+            print(f"  taxonomy lookup failed ({type(e).__name__}), "
+                  f"falling back to species codes")
+
+    still = [c for c in codes if c not in names]
+    if still:
+        # A code is an ugly label but a working one. Failing the publish over a
+        # display string would be the wrong trade.
+        print(f"  {len(still)} species have no common name, showing the code: "
+              f"{', '.join(still[:6])}{' ...' if len(still) > 6 else ''}")
+        names.update({c: c for c in still})
+
+    (DATA / "species_names.json").write_text(
+        json.dumps(names, indent=1, sort_keys=True))
+    return names
 
 
 def hotspots():
@@ -140,7 +190,7 @@ if __name__ == "__main__":
             "the point. Only fitted coefficients go here, never eBird records.")
 
     models = json.loads((DATA / "model_coefficients.json").read_text())
-    names = json.loads((DATA / "species_names.json").read_text())
+    names = species_names(sorted(models))
     hs, weeks = build(models, names)
 
     size = sum(f.stat().st_size for f in BUNDLE.rglob("*") if f.is_file())
