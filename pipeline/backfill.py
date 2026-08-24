@@ -87,6 +87,28 @@ def run(script, *args, env=None):
         sys.exit(f"{script} failed with code {r.returncode}")
 
 
+def stored_by_region():
+    """[(region, days, checklists)] already in the database, busiest first.
+
+    What a run is adding to is not obvious from the outside: data/ is
+    gitignored, the database lives in a private dataset, and the counts in a
+    push message are totals with no breakdown. Printing this before a plan
+    makes "how much of the state is actually covered" answerable without
+    downloading twenty megabytes and opening DuckDB by hand.
+    """
+    if not DB.exists() or DB.stat().st_size == 0:
+        return []
+    con = duckdb.connect(str(DB), read_only=True)
+    try:
+        rows = con.execute("""
+            select region, count(distinct obs_date), count(*)
+            from checklists group by region order by 3 desc""").fetchall()
+    except duckdb.Error:
+        rows = []
+    con.close()
+    return rows
+
+
 def already_have():
     """{(region, date)} already scraped."""
     if not DB.exists() or DB.stat().st_size == 0:
@@ -193,8 +215,12 @@ if __name__ == "__main__":
     # The ordinary one: already_have() is what makes a run resumable, and it
     # can only skip the region-days it can see. A runner that starts blind
     # re-scrapes days another machine already paid for.
-    if not a.plan:
-        run("sync_db.py", "pull")
+    #
+    # --plan pulls too. It reports what is outstanding, which is a statement
+    # about the stored database and not about this runner's disk — answering
+    # it from whatever the cache happened to restore would overstate the work
+    # left, which is the one number somebody runs a plan to find out.
+    run("sync_db.py", "pull")
 
     regions, volume, all_volume = expand(a.regions)
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
@@ -262,6 +288,18 @@ if __name__ == "__main__":
           f"runs of {a.budget_min} min to finish", flush=True)
 
     if a.plan:
+        have_rows = stored_by_region()
+        if have_rows:
+            tot_d = sum(r[1] for r in have_rows)
+            tot_c = sum(r[2] for r in have_rows)
+            print(f"\nalready stored: {tot_c:,} checklists over {tot_d:,} "
+                  f"region-days in {len(have_rows)} region(s)")
+            for region, days_n, n in have_rows[:15]:
+                print(f"  {region:<12} {days_n:>4} days  {n:>7,} checklists")
+            if len(have_rows) > 15:
+                print(f"  ... and {len(have_rows) - 15} more")
+        else:
+            print("\nalready stored: nothing — the database is empty.")
         print("\n--plan: nothing scraped.")
         raise SystemExit(0)
     print(flush=True)
