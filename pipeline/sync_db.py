@@ -137,12 +137,50 @@ def pull(repo, token):
         tmp.unlink(missing_ok=True)
 
 
+def remote_counts(api, repo):
+    """What the last push said it was publishing, from the commit message.
+
+    Reading the counts off the history rather than downloading the file: the
+    database is twenty megabytes and a backfill pushes every fifteen
+    region-days, so fetching it back each time to compare would cost more than
+    the scrape. Best effort by design — an unreadable or unrecognised message
+    returns None and the caller carries on rather than blocking a push.
+    """
+    import ast
+    try:
+        msg = api.list_repo_commits(repo, repo_type="dataset")[0].title
+        return ast.literal_eval(msg.split("sync: ", 1)[1])
+    except Exception:
+        return None
+
+
 def push(repo, token):
     from huggingface_hub import HfApi
     if not DB.exists():
         sys.exit("no data/birding.duckdb to push — run the scrape first.")
+
+    # An upload replaces the file whole, so a local database smaller than the
+    # published one is a destructive push about to happen — a runner that
+    # scraped without pulling first, most likely. Every legitimate push grows
+    # the table, because merge() only ever inserts and the scrape only ever
+    # adds. Refuse rather than publish the loss and find out later.
+    api = HfApi(token=token)
+    there, here = remote_counts(api, repo), counts(DB)
+    if there:
+        shrunk = {t: (there[t], here.get(t, 0)) for t in there
+                  if here.get(t, 0) < there[t]}
+        if shrunk:
+            sys.exit(
+                f"refusing to push: this would shrink {repo}.\n" +
+                "".join(f"  {t}: {r:,} published -> {l:,} local\n"
+                        for t, (r, l) in shrunk.items()) +
+                "The local database is missing rows the remote has, which "
+                "means it was not pulled before scraping. Run\n"
+                "  python pipeline/sync_db.py pull\n"
+                "and push again. Nothing has been changed on the remote.")
+
     mb = DB.stat().st_size / 1024**2
-    HfApi(token=token).upload_file(
+    api.upload_file(
         path_or_fileobj=str(DB), path_in_repo=REMOTE_NAME,
         repo_id=repo, repo_type="dataset",
         commit_message=f"sync: {counts(DB)}")

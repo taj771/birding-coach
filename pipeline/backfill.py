@@ -178,6 +178,24 @@ if __name__ == "__main__":
         end = settled
 
     (ROOT / "data").mkdir(exist_ok=True)
+
+    # Pull before anything reads the database, for two separate reasons.
+    #
+    # The dangerous one: sync_db.py push uploads the local file whole, it does
+    # not merge. run.py pulls first so its push can only ever be a superset,
+    # but the workflow calls this script directly and it did not, which left
+    # the entire history depending on the Actions cache restoring data/. On a
+    # cache miss — evicted after seven days, or under the repo cache limit —
+    # this would have scraped fifteen region-days into an empty database and
+    # published that over everything. Nothing had been lost yet; the cache had
+    # been restoring. It was one eviction away.
+    #
+    # The ordinary one: already_have() is what makes a run resumable, and it
+    # can only skip the region-days it can see. A runner that starts blind
+    # re-scrapes days another machine already paid for.
+    if not a.plan:
+        run("sync_db.py", "pull")
+
     regions, volume, all_volume = expand(a.regions)
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     have = already_have()
