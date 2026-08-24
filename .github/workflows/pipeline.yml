@@ -33,6 +33,9 @@ on:
       regions:
         description: 'backfill only — counties, or a state code like US-PA'
         default: ''
+      top_hotspots:
+        description: 'backfill only — scrape only the N busiest hotspots (0 = every one)'
+        default: '400'
 
 # Two runs at once would both pull the shared database, scrape different days,
 # and push — and whichever finished second would overwrite the other's work.
@@ -160,22 +163,33 @@ jobs:
         run: |
           MODE="${{ inputs.mode }}"
           if [ -z "$MODE" ]; then
-            # Three crons now, told apart by the minute they fire on. The
-            # backfill one runs at :30, the other two on the hour.
-            if [ "$(date -u +%M)" = "30" ]; then
-              MODE=backfill
-            elif [ "$(date -u +%H)" = "09" ]; then
-              MODE=monthly
-            else
-              MODE=daily
-            fi
+            # Which cron fired, asked of GitHub rather than inferred from the
+            # clock. Reading `date` here was wrong twice over: scheduled runs
+            # start late on shared runners — on 2026-08-24 the :30 cron fired
+            # at :35 and again at :29, and the 08:00 one at 08:42 — and the
+            # concurrency queue can hold a run for hours behind another. Every
+            # firing therefore missed the "30" match and silently fell through
+            # to daily, so the backfill schedule never once ran a backfill.
+            # github.event.schedule is the cron string itself and does not move.
+            case "${{ github.event.schedule }}" in
+              '30 */6 * * *') MODE=backfill ;;
+              '0 9 1 * *')    MODE=monthly  ;;
+              *)              MODE=daily    ;;
+            esac
           fi
-          echo "mode: $MODE"
+          echo "mode: $MODE (schedule='${{ github.event.schedule }}')"
 
           if [ "$MODE" = "backfill" ]; then
             START="${{ inputs.start }}"
             END="${{ inputs.end }}"
             REGIONS="${{ inputs.regions }}"
+            # Only the backfill narrows the site list. The daily scrape works
+            # one county with no SCRAPE_SCOPE, so the same setting there would
+            # rank sites within that county and keep a different four hundred
+            # than the statewide ranking does — two definitions of "the busiest
+            # sites" writing into one database.
+            export TOP_HOTSPOTS="${{ inputs.top_hotspots || '400' }}"
+            echo "sites: top $TOP_HOTSPOTS hotspots"
             # A scheduled backfill has no inputs, so it falls back to the
             # standing range: the last twelve months across the configured
             # regions. The script trims the end date to what has settled and

@@ -50,6 +50,19 @@ MIN_HOTSPOT_HISTORY = int(os.getenv("MIN_HOTSPOT_HISTORY", "10"))
 # training data match what the app actually predicts for.
 HOTSPOTS_ONLY = os.getenv("HOTSPOTS_ONLY", "0") == "1"
 
+# The full scrape scope, which is not the same thing as the region being
+# scraped right now: backfill.py works one county at a time, and ranking the
+# busiest sites within a single county would give Forest County the same share
+# of the budget as Philadelphia. Defaults to the region so a direct run still
+# behaves sensibly.
+SCOPE = os.getenv("SCRAPE_SCOPE") or ",".join(REGIONS)
+
+# {region: {loc_id}} when TOP_HOTSPOTS narrows the scrape to the busiest
+# sites, otherwise None for "every hotspot". Built once: it reads the cached
+# hotspot reference, so it costs nothing per day, and holding it fixed for the
+# process means every day in a run is scraped against the same site list.
+SELECTED = hotspots_ref.selection(SCOPE)
+
 DB = ROOT / "data" / "birding.duckdb"
 DAYS = ROOT / "data" / "scrape_days.json"
 DELAY = ebird_api.DELAY
@@ -109,6 +122,13 @@ def day_feed(region, date):
     calls = 1
     sites = [h for h in hotspots_ref.load(region)
              if h["n_checklists"] >= MIN_HOTSPOT_HISTORY]
+    # Re-asking sites we are going to discard anyway would cost one call each
+    # and recover nothing: on a narrowed scrape the fan-out is the single most
+    # expensive thing a day can do, and it is spent entirely on the county's
+    # long tail unless it is filtered here too.
+    if SELECTED is not None:
+        allow = SELECTED.get(region, set())
+        sites = [h for h in sites if h["loc_id"] in allow]
     print(f"    capped at {CAP} — re-asking {len(sites)} hotspots", flush=True)
 
     for h in sites:
@@ -183,10 +203,24 @@ def scrape(con, dates, regions):
             kept = [x for x in lists if is_hotspot(x)]
         else:
             kept = lists
+        personal = len(lists) - len(kept)
+
+        # The narrowing has to happen here, before the view calls: the feed
+        # already told us where each checklist was filed, so a site we are not
+        # keeping costs nothing to discard and roughly seven seconds to fetch.
+        if SELECTED is not None:
+            allow = SELECTED.get(region, set())
+            before = len(kept)
+            kept = [x for x in kept
+                    if (x.get("loc") or {}).get("locId") in allow]
+            off_list = before - len(kept)
+        else:
+            off_list = 0
 
         sub_ids = [x["subId"] for x in kept if x.get("subId")]
         todo = [s for s in sub_ids if s not in seen]
-        drop = "" if not HOTSPOTS_ONLY else f", {len(lists) - len(kept):>3} personal skipped"
+        drop = f", {personal:>3} personal skipped" if HOTSPOTS_ONLY else ""
+        drop += f", {off_list:>4} off-list skipped" if SELECTED is not None else ""
         print(f"[{i}/{len(units)}] {region} {d} ({day['kind']:>8}) "
               f"{len(sub_ids):>4} checklists, {len(todo):>4} new{drop}",
               flush=True)
@@ -226,6 +260,12 @@ if __name__ == "__main__":
     dates = json.loads(DAYS.read_text())
     print(f"regions {len(REGIONS)}: {', '.join(REGIONS[:6])}{' ...' if len(REGIONS) > 6 else ''}")
     print(f"scope   {'hotspots only' if HOTSPOTS_ONLY else 'all locations'}")
+    if SELECTED is not None:
+        n_sites = sum(len(v) for v in SELECTED.values())
+        mine = len(SELECTED.get(REGIONS[0], set())) if len(REGIONS) == 1 else None
+        print(f"sites   top {hotspots_ref.TOP_HOTSPOTS} across {SCOPE} "
+              f"({n_sites:,} selected in {len(SELECTED)} counties"
+              f"{f', {mine} here' if mine is not None else ''})")
     print(f"days    {len(dates)}  ({dates[0]['date']} .. {dates[-1]['date']})")
     print(f"db      {DB}")
     print(f"delay   {DELAY}s\n", flush=True)
