@@ -109,11 +109,26 @@ def ids(region):
 
 
 def counties(state):
-    """County codes for a state, e.g. US-PA -> ['US-PA-001', ...]."""
+    """County codes for a state, e.g. US-PA -> ['US-PA-001', ...].
+
+    Answered from the cache when it is populated. split_state() writes one
+    file per county and the filename is the code, so once a state has been
+    fetched this needs no request at all — which also means a backfill can
+    build its work queue with the network unavailable.
+    """
+    cached = sorted(p.stem for p in CACHE.glob(f"{state}-*.json"))
+    if cached:
+        return cached
+
     r = ebird_api.get(f"/ref/region/list/subnational2/{state}")
-    if r is None:
-        sys.exit(f"could not list counties for {state}")
-    return [c["code"] for c in r]
+    if r is not None:
+        return [c["code"] for c in r]
+
+    # Last resort: fetching the state's hotspots also tells us its counties,
+    # and it is the call we would be making shortly anyway.
+    if split_state(state):
+        return sorted(p.stem for p in CACHE.glob(f"{state}-*.json"))
+    sys.exit(f"could not list counties for {state}")
 
 
 if __name__ == "__main__":
