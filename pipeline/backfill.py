@@ -156,6 +156,13 @@ if __name__ == "__main__":
                    help="stop after this many region-days; re-run to continue")
     p.add_argument("--budget-min", type=int, default=BUDGET_MIN,
                    help="stop cleanly after this many minutes")
+    # A region-day is never revisited once it holds any checklist, so the site
+    # selection is effectively permanent for every day it touches: widening it
+    # later leaves the days already scraped as they were. That makes "what
+    # would this actually fetch" a question worth answering before a multi-day
+    # run rather than during one.
+    p.add_argument("--plan", action="store_true",
+                   help="print the plan and the estimate, then exit")
     a = p.parse_args()
 
     t0 = time.time()
@@ -179,12 +186,25 @@ if __name__ == "__main__":
     todo = [(r, d) for r in regions for d in days if (r, d) not in have]
 
     import hotspots_ref
-    if hotspots_ref.TOP_HOTSPOTS > 0:
+    selected = hotspots_ref.selection(a.regions)
+    if selected is not None:
+        n_sites = sum(len(v) for v in selected.values())
         share = (sum(volume.values()) / all_volume) if all_volume else 0
-        print(f"sites      top {hotspots_ref.TOP_HOTSPOTS:,} hotspots, "
-              f"{share:.0%} of all recorded birding in {a.regions}, "
-              f"in {len(regions)} of {len(hotspots_ref.expand(a.regions))} "
-              f"counties")
+        rule = []
+        if hotspots_ref.MAX_COUNTIES > 0:
+            rule.append(f"busiest {hotspots_ref.MAX_COUNTIES} counties")
+        if hotspots_ref.PER_COUNTY_HOTSPOTS > 0:
+            rule.append(f"top {hotspots_ref.PER_COUNTY_HOTSPOTS} per county")
+        if hotspots_ref.TOP_HOTSPOTS > 0:
+            rule.append(f"top {hotspots_ref.TOP_HOTSPOTS} overall")
+        print(f"sites      {n_sites:,} hotspots ({' + '.join(rule)}) "
+              f"across {len(regions)} of "
+              f"{len(hotspots_ref.expand(a.regions))} counties")
+        # The share is the honest headline: it is how much of the region's
+        # recorded birding these sites actually hold, and a coverage-first
+        # selection buys a much smaller one than a volume-first selection of
+        # the same size. Worth seeing before a multi-day run, not after.
+        print(f"           {share:.0%} of all recorded birding in {a.regions}")
 
     print(f"regions    {len(regions)}  ({', '.join(regions[:4])}"
           f"{' ...' if len(regions) > 4 else ''})")
@@ -219,7 +239,14 @@ if __name__ == "__main__":
           f"({len(todo):,} feeds + ~{views:,.0f} checklists), "
           f"~{calls * SEC_PER_CALL / 3600:.0f} h at {SEC_PER_CALL} s a call")
     print(f"           excludes hotspot fan-out on capped days")
-    print(f"budget     {a.budget_min} min this run\n", flush=True)
+    print(f"budget     {a.budget_min} min this run")
+    print(f"           ~{calls * SEC_PER_CALL / 3600 / (a.budget_min / 60):.0f} "
+          f"runs of {a.budget_min} min to finish", flush=True)
+
+    if a.plan:
+        print("\n--plan: nothing scraped.")
+        raise SystemExit(0)
+    print(flush=True)
 
     done = stopped = 0
     for i in range(0, len(todo), CHUNK):

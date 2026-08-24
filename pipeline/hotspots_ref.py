@@ -44,6 +44,10 @@ CACHE = ROOT / "data" / "hotspots_ref"
 # here rather than in each caller so the scraper and the work-queue planner
 # cannot disagree about which sites are in scope.
 TOP_HOTSPOTS = int(os.getenv("TOP_HOTSPOTS", "0"))
+# Per county instead of across the state, for coverage rather than volume, and
+# a cap on how many counties are worth visiting at all. See selection().
+PER_COUNTY_HOTSPOTS = int(os.getenv("PER_COUNTY_HOTSPOTS", "0"))
+MAX_COUNTIES = int(os.getenv("MAX_COUNTIES", "0"))
 
 
 def fetch(region):
@@ -130,7 +134,7 @@ def expand(spec):
 
 
 def selection(spec):
-    """The TOP_HOTSPOTS busiest sites across `spec`, as {region: {loc_id}}.
+    """Which sites are worth scraping in `spec`, as {region: {loc_id}}.
 
     WHY NARROW AT ALL
     Scraping every hotspot in Pennsylvania for a year is about 207,000
@@ -142,33 +146,59 @@ def selection(spec):
 
     Birding is concentrated enough that most of it is not needed. In Allegheny
     the top 100 of 273 hotspots hold 91% of all checklists ever filed, and two
-    parks alone hold 21%. Taking the head of that distribution statewide buys
-    most of the record for a fraction of the calls, and the sites it keeps are
-    the ones the app is asked about anyway — a hotspot with nine all-time
-    checklists cannot support a site effect worth serving.
+    parks alone hold 21%.
 
-    Ranked across the whole spec rather than per county on purpose: a fixed
-    number per county would spend the same budget on Forest County, four
-    checklists on a good day, as on Philadelphia.
+    THREE KNOBS, BECAUSE "NARROW" MEANS TWO DIFFERENT THINGS
+    TOP_HOTSPOTS ranks sites across the whole spec and keeps the busiest N.
+    That buys the most records per call, and it is the right answer when the
+    model is what matters — but it concentrates. Pennsylvania's birding sits
+    in the southeast, so a statewide top 400 leaves most counties with nothing
+    at all and a map of the state looking empty outside Philadelphia.
 
-    Returns None when TOP_HOTSPOTS is unset or zero, meaning "no narrowing" —
-    callers treat that as "keep everything" rather than "keep nothing".
-    Regions with no selected site are absent from the mapping, which is what
-    lets a caller skip their feed calls entirely.
+    PER_COUNTY_HOTSPOTS instead keeps each county's own busiest N. It costs
+    more per record — a quiet county's tenth site is worth less than a busy
+    county's hundredth — and it keeps every county in the work queue, which is
+    one feed call per county per day whether or not the day yields anything.
+    What it buys is coverage everywhere, which is what a demo needs: somewhere
+    to point at in any county someone asks about.
+
+    MAX_COUNTIES trims the tail of counties entirely, for when a handful of
+    near-empty ones are not worth their feed calls.
+
+    They compose, applied in that order: counties are trimmed, then each
+    surviving county is trimmed, then an overall cap is applied to whatever is
+    left. Each is off at zero, and with all three off this returns None,
+    meaning "no narrowing" — callers read that as keep everything rather than
+    keep nothing. Regions with no selected site are absent from the mapping,
+    which is what lets a caller skip their feed calls entirely.
     """
-    if TOP_HOTSPOTS <= 0:
+    if TOP_HOTSPOTS <= 0 and PER_COUNTY_HOTSPOTS <= 0 and MAX_COUNTIES <= 0:
         return None
 
     # Keyed by the region we will actually scrape rather than by the hotspot's
     # own subnational2Code: the two normally agree, but the code is missing on
     # a few sites and a None key would quietly drop them.
-    ranked = sorted(((r, h) for r in expand(spec) for h in load(r)),
-                    key=lambda rh: -rh[1]["n_checklists"])
+    by_region = {r: sorted(load(r), key=lambda h: -h["n_checklists"])
+                 for r in expand(spec)}
 
-    chosen = {}
-    for region, h in ranked[:TOP_HOTSPOTS]:
-        chosen.setdefault(region, set()).add(h["loc_id"])
-    return chosen
+    if MAX_COUNTIES > 0:
+        busiest = sorted(by_region,
+                         key=lambda r: -sum(h["n_checklists"]
+                                            for h in by_region[r]))
+        by_region = {r: by_region[r] for r in busiest[:MAX_COUNTIES]}
+
+    if PER_COUNTY_HOTSPOTS > 0:
+        by_region = {r: hs[:PER_COUNTY_HOTSPOTS] for r, hs in by_region.items()}
+
+    if TOP_HOTSPOTS > 0:
+        ranked = sorted(((r, h) for r, hs in by_region.items() for h in hs),
+                        key=lambda rh: -rh[1]["n_checklists"])[:TOP_HOTSPOTS]
+        chosen = {}
+        for region, h in ranked:
+            chosen.setdefault(region, set()).add(h["loc_id"])
+        return chosen
+
+    return {r: {h["loc_id"] for h in hs} for r, hs in by_region.items() if hs}
 
 
 def counties(state):
