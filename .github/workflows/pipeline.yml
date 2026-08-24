@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 8 * * *'      # daily 08:00 UTC — scrape settled checklists
     - cron: '0 9 1 * *'      # 1st of month  — refit and publish
+    # Drives a long backfill without anyone pressing a button. Each firing
+    # works for five hours, pushes as it goes and exits; the next one reads
+    # what is already stored and carries on. When the range is complete the
+    # script prints "nothing to do" and exits in seconds, so leaving this in
+    # place costs nothing — delete the line once the backfill is finished.
+    - cron: '30 */6 * * *'   # every 6 h      — continue the backfill
   workflow_dispatch:          # and a manual button
     inputs:
       mode:
@@ -23,6 +29,9 @@ on:
         default: ''
       end:
         description: 'backfill only — last date, e.g. 2025-11-01'
+        default: ''
+      regions:
+        description: 'backfill only — counties, or a state code like US-PA'
         default: ''
 
 # Two runs at once would both pull the shared database, scrape different days,
@@ -139,25 +148,48 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SCRAPE_DELAY: '0.5'
+          # Public hotspots only — parks, reserves, wildlife areas. Personal
+          # locations cannot be enumerated when a day hits the 200 cap, and the
+          # app never forecasts for somebody's garden either, so restricting the
+          # population makes the training data match what is actually served.
+          HOTSPOTS_ONLY: '1'
+          # Stop cleanly before the job's 330-minute ceiling: being killed
+          # mid-chunk loses whatever it had fetched, stopping deliberately does
+          # not.
+          BUDGET_MIN: '300'
         run: |
           MODE="${{ inputs.mode }}"
           if [ -z "$MODE" ]; then
-            # the monthly cron fires at 09:00; the daily one at 08:00
-            [ "$(date -u +%H)" = "09" ] && MODE=monthly || MODE=daily
+            # Three crons now, told apart by the minute they fire on. The
+            # backfill one runs at :30, the other two on the hour.
+            if [ "$(date -u +%M)" = "30" ]; then
+              MODE=backfill
+            elif [ "$(date -u +%H)" = "09" ]; then
+              MODE=monthly
+            else
+              MODE=daily
+            fi
           fi
           echo "mode: $MODE"
 
           if [ "$MODE" = "backfill" ]; then
             START="${{ inputs.start }}"
             END="${{ inputs.end }}"
-            if [ -z "$START" ] || [ -z "$END" ]; then
-              echo "::error::backfill needs both start and end dates."
-              exit 1
-            fi
+            REGIONS="${{ inputs.regions }}"
+            # A scheduled backfill has no inputs, so it falls back to the
+            # standing range: the last twelve months across the configured
+            # regions. The script trims the end date to what has settled and
+            # skips region-days already stored, so this is safe to fire
+            # repeatedly.
+            : "${START:=$(date -u -d '1 year ago' +%Y-%m-%d 2>/dev/null || date -u -v-1y +%Y-%m-%d)}"
+            : "${END:=$(date -u +%Y-%m-%d)}"
+            : "${REGIONS:=${BACKFILL_REGIONS:-US-PA}}"
+            echo "backfill $START .. $END  regions=$REGIONS"
             # --max-days keeps a run inside the job timeout. The script skips
             # days already stored, so running it again continues where it
             # stopped rather than starting over.
-            python -u pipeline/backfill.py "$START" "$END" --max-days 200
+            python -u pipeline/backfill.py "$START" "$END" \
+              --regions "$REGIONS" --budget-min "$BUDGET_MIN"
           else
             python -u pipeline/run.py "$MODE"
           fi

@@ -1,7 +1,8 @@
-"""Scrape a date range to fill gaps in the calendar.
+"""Scrape a date range across one or many regions, to fill gaps in the calendar.
 
-    python pipeline/backfill.py 2025-08-01 2025-11-01
-    python pipeline/backfill.py 2025-08-01 2025-11-01 --max-days 30
+    python pipeline/backfill.py 2025-08-01 2026-07-31
+    python pipeline/backfill.py 2025-08-01 2026-07-31 --regions US-PA
+    python pipeline/backfill.py 2025-08-01 2026-07-31 --budget-min 300
 
 WHY THIS EXISTS
 The daily job scrapes a rolling seven-day window, so the database grows
@@ -10,25 +11,36 @@ The model needs the opposite: coverage across the whole year, now.
 
 Week terms are indexed by day-of-year, not by date, so a gap at week 31 is
 filled by scraping *any* year's week 31. Last year's August is as good as this
-year's for that purpose and is already settled, which is why the range below is
-historical rather than recent.
+year's for that purpose and is already settled.
+
+THE UNIT OF WORK IS A REGION-DAY
+A single county was one dimension, so a day was a work unit. Statewide it is a
+pair: Allegheny on 3 May is a different unit from Chester on 3 May. Passing a
+state code expands it to that state's counties.
+
+Counties are ordered by how much birding happens in them, busiest first. A run
+that stops half way then leaves the high-traffic counties complete rather than
+sixty-seven counties each a third done — the first is a usable model, the
+second is not.
 
 RESUMABLE
-Days already in the database are skipped, so re-running costs nothing and an
-interrupted run continues where it stopped. `--max-days` caps one run, which is
-how a long backfill is split across several CI jobs without hitting the job
-timeout.
+Region-days already in the database are skipped, so re-running costs nothing
+and an interrupted run continues where it stopped. That is a query rather than
+a bookmark, so it survives a job being killed, a cache being evicted, or a run
+that never started.
 
-COST
-Two eBird calls per checklist, plus one per day for the feed. Allegheny averages
-about 90 complete checklists a day outside migration and about 150 in May, so a
-three-month backfill is roughly 9,000 calls — around an hour at the default
-delay. The estimate is printed before anything is fetched.
+TIME BUDGET
+A GitHub job is killed at six hours; ours stops itself at five. Being killed
+loses whatever the current chunk had fetched, because the push had not
+happened yet. Stopping deliberately finishes the chunk, pushes it, and exits
+green — which matters when the run is one of nine.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -39,32 +51,65 @@ PY = sys.executable
 DB = ROOT / "data" / "birding.duckdb"
 DAYS_FILE = ROOT / "data" / "scrape_days.json"
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 # eBird submissions trail the outing; the same seven days the daily job waits
 LAG_DAYS = 7
-# rough checklists per day in Allegheny, for the estimate only
-PER_DAY = 110
-# Days per push. A run cancelled at day 34 of a 40-day chunk lost all 34,
-# because nothing had been pushed yet — so this is now small enough that a
+# Hotspot checklists filed per day across the whole state, for the estimate
+# only. Derived from measurement rather than guessed: Allegheny yields about 42
+# hotspot checklists a day and holds 7.2% of Pennsylvania's all-time hotspot
+# checklists, so the state runs at roughly 42 / 0.072.
+STATE_PER_DAY = float(os.getenv("STATE_PER_DAY", "580"))
+# Region-days per push. A run cancelled at day 34 of a 40-day chunk lost all
+# 34, because nothing had been pushed yet — so this is small enough that a
 # cancellation costs minutes rather than an hour, while still not shipping the
 # whole database to Hugging Face every ninety seconds.
-CHUNK = 15
+CHUNK = int(os.getenv("BACKFILL_CHUNK", "15"))
+# Stop this many minutes in. The job's own ceiling is 330; leaving half an hour
+# means the last chunk and its push finish inside it.
+BUDGET_MIN = int(os.getenv("BUDGET_MIN", "300"))
 
 
-def run(script, *args):
+def run(script, *args, env=None):
     print(f"\n{'=' * 60}\n  {script} {' '.join(args)}\n{'=' * 60}", flush=True)
-    r = subprocess.run([PY, str(ROOT / "pipeline" / script), *args])
+    r = subprocess.run([PY, str(ROOT / "pipeline" / script), *args],
+                       env={**os.environ, **(env or {})})
     if r.returncode != 0:
         sys.exit(f"{script} failed with code {r.returncode}")
 
 
 def already_have():
-    if not DB.exists():
+    """{(region, date)} already scraped."""
+    if not DB.exists() or DB.stat().st_size == 0:
         return set()
     con = duckdb.connect(str(DB), read_only=True)
-    have = {r[0] for r in con.execute(
-        "select distinct obs_date from checklists").fetchall()}
+    try:
+        rows = con.execute(
+            "select distinct region, obs_date from checklists").fetchall()
+    except duckdb.Error:
+        rows = []
     con.close()
-    return have
+    return {(r[0], r[1]) for r in rows}
+
+
+def expand(spec):
+    """'US-PA' -> its counties; 'US-PA-003,US-PA-101' -> that list.
+
+    Ordered busiest first, using eBird's own all-time checklist counts per
+    hotspot summed by county. A partial run then leaves whole high-traffic
+    counties finished instead of every county part-done.
+    """
+    import hotspots_ref
+
+    parts = [s.strip() for s in spec.split(",") if s.strip()]
+    regions = []
+    for p in parts:
+        regions.extend(hotspots_ref.counties(p) if p.count("-") == 1 else [p])
+
+    volume = {}
+    for r in regions:
+        volume[r] = sum(h["n_checklists"] for h in hotspots_ref.load(r))
+    return sorted(regions, key=lambda r: -volume.get(r, 0)), volume
 
 
 def parse(s):
@@ -80,11 +125,16 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("start", help="first date, e.g. 2025-08-01")
     p.add_argument("end", help="last date, inclusive")
-    p.add_argument("--max-days", type=int, default=None,
-                   help="stop after this many days; re-run to continue")
+    p.add_argument("--regions", default=os.getenv("SCRAPE_REGION", "US-PA-003"),
+                   help="county codes, or a state code to expand")
+    p.add_argument("--max-units", type=int, default=None,
+                   help="stop after this many region-days; re-run to continue")
+    p.add_argument("--budget-min", type=int, default=BUDGET_MIN,
+                   help="stop cleanly after this many minutes")
     a = p.parse_args()
 
-    start, end, cap = parse(a.start), parse(a.end), a.max_days
+    t0 = time.time()
+    start, end = parse(a.start), parse(a.end)
     if start > end:
         sys.exit("start date is after end date")
 
@@ -96,47 +146,87 @@ if __name__ == "__main__":
         end = settled
 
     (ROOT / "data").mkdir(exist_ok=True)
+    regions, volume = expand(a.regions)
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     have = already_have()
-    wanted = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    todo = [d for d in wanted if d not in have]
 
-    print(f"range      {start} .. {end}  ({len(wanted)} days)")
-    print(f"already in {len(wanted) - len(todo)} days")
-    print(f"to scrape  {len(todo)} days")
-    if cap and len(todo) > cap:
-        todo = todo[:cap]
-        print(f"capped at  {cap} this run — re-run to continue")
+    # region-major: finish a county before starting the next one
+    todo = [(r, d) for r in regions for d in days if (r, d) not in have]
+
+    print(f"regions    {len(regions)}  ({', '.join(regions[:4])}"
+          f"{' ...' if len(regions) > 4 else ''})")
+    print(f"range      {start} .. {end}  ({len(days)} days)")
+    print(f"units      {len(regions) * len(days):,} region-days, "
+          f"{len(todo):,} outstanding")
+    if a.max_units and len(todo) > a.max_units:
+        todo = todo[:a.max_units]
+        print(f"capped at  {a.max_units:,} this run")
     if not todo:
         print("\nnothing to do; the range is already covered.")
         raise SystemExit(0)
 
-    calls = len(todo) * (PER_DAY + 1)
-    print(f"\nestimate   ~{calls:,} eBird calls, "
-          f"~{calls * 0.4 / 3600:.1f} h at 0.4 s between them")
-    print(f"weeks hit  {sorted({d.timetuple().tm_yday // 7 for d in todo})}")
+    # Estimate per county rather than per unit. A flat rate would price Forest
+    # County — four checklists on a good day — the same as Allegheny, and
+    # across sixty-seven counties that is not a rounding error: it inflates the
+    # figure roughly eightfold, which is the difference between "leave it
+    # running for two days" and "this is not worth doing".
+    #
+    # Each county's share of the state's all-time hotspot checklists is used as
+    # its share of current activity, scaled by the rate we actually measured in
+    # Allegheny: 42 hotspot checklists a day at 7.2% of the state's volume.
+    total_vol = sum(volume.values()) or 1
+    per_day = {r: max(1.0, (volume.get(r, 0) / total_vol) * STATE_PER_DAY)
+               for r in regions}
+    views = sum(per_day[r] for r, _ in todo)
+    calls = len(todo) + views          # one feed per unit, one view per checklist
+    print(f"estimate   ~{calls:,.0f} eBird calls "
+          f"({len(todo):,} feeds + ~{views:,.0f} checklists), "
+          f"~{calls * 0.5 / 3600:.0f} h at 0.5 s between them")
+    print(f"           excludes hotspot fan-out on capped days")
+    print(f"budget     {a.budget_min} min this run\n", flush=True)
 
-    # Scrape in chunks and push after each one. A long backfill can outlast a
-    # CI job's timeout, and a single push at the end would mean a killed job
-    # threw away everything it had fetched. Pushing every CHUNK days bounds the
-    # loss to one chunk, and re-running resumes from whatever landed.
+    done = stopped = 0
     for i in range(0, len(todo), CHUNK):
-        batch = todo[i:i + CHUNK]
-        print(f"\n{'#' * 60}\n#  chunk {i // CHUNK + 1}: {batch[0]} .. {batch[-1]} "
-              f"({len(batch)} days)\n{'#' * 60}", flush=True)
-        DAYS_FILE.write_text(json.dumps(
-            [{"date": str(d), "kind": "backfill", "wind_max": 0.0} for d in batch],
-            indent=2))
-        # The push goes in a finally. Chunking exists so that a killed run
-        # loses one chunk rather than everything, and that guarantee only holds
-        # if the push happens — a crash in a *later* step would otherwise throw
-        # away scraping that had already succeeded. It has done exactly that.
-        try:
-            run("scrape_ebird.py")
-            run("backfill_locations.py")
-        finally:
-            run("sync_db.py", "push")
+        spent = (time.time() - t0) / 60
+        if spent > a.budget_min:
+            # Deliberate stop rather than being killed mid-chunk: everything
+            # up to here has been pushed, and the next run picks the rest up
+            # from the database instead of from a plan it has to remember.
+            print(f"\n{'#' * 60}\n#  time budget reached at {spent:.0f} min — "
+                  f"stopping cleanly\n{'#' * 60}", flush=True)
+            stopped = 1
+            break
 
-    left = [d for d in wanted if d not in already_have()]
-    print(f"\ndone. {len(left)} days of the range still missing.")
+        batch = todo[i:i + CHUNK]
+        # A chunk is one region at a time: scrape_ebird takes SCRAPE_REGION,
+        # and mixing counties inside a chunk would mean the day list no longer
+        # describes what is being fetched.
+        by_region = {}
+        for r, d in batch:
+            by_region.setdefault(r, []).append(d)
+
+        for region, dates in by_region.items():
+            print(f"\n{'#' * 60}\n#  {region}: {dates[0]} .. {dates[-1]} "
+                  f"({len(dates)} days)   [{done:,}/{len(todo):,} done, "
+                  f"{spent:.0f} min]\n{'#' * 60}", flush=True)
+            DAYS_FILE.write_text(json.dumps(
+                [{"date": str(d), "kind": "backfill", "wind_max": 0.0}
+                 for d in dates], indent=2))
+            try:
+                run("scrape_ebird.py", env={"SCRAPE_REGION": region})
+                run("backfill_locations.py", env={"SCRAPE_REGION": region})
+            finally:
+                run("sync_db.py", "push")
+            done += len(dates)
+
+    left = [(r, d) for r in regions for d in days
+            if (r, d) not in already_have()]
+    mins = (time.time() - t0) / 60
+    print(f"\n{'=' * 60}")
+    print(f"scraped {done:,} region-days in {mins:.0f} min")
+    print(f"{len(left):,} of {len(regions) * len(days):,} still outstanding")
     if left:
-        print(f"re-run the same command to continue from {left[0]}.")
+        nxt = left[0]
+        print(f"re-run the same command to continue from {nxt[0]} {nxt[1]}.")
+    if stopped:
+        print("stopped on the time budget, not an error — this run is green.")
