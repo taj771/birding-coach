@@ -24,6 +24,7 @@ on:
           - monthly          # refit and publish
           - all              # both
           - backfill         # scrape a past date range, to fill calendar gaps
+          - plan             # price a backfill without scraping anything
       start:
         description: 'backfill only — first date, e.g. 2025-08-25'
         default: ''
@@ -34,8 +35,14 @@ on:
         description: 'backfill only — counties, or a state code like US-PA'
         default: ''
       top_hotspots:
-        description: 'backfill only — scrape only the N busiest hotspots (0 = every one)'
-        default: '400'
+        description: 'backfill only — cap on busiest hotspots overall (0 = no cap)'
+        default: '0'
+      per_county_hotspots:
+        description: 'backfill only — busiest N hotspots in EACH county (0 = all)'
+        default: '10'
+      max_counties:
+        description: 'backfill only — visit only the busiest N counties (0 = all)'
+        default: '0'
 
 # Two runs at once would both pull the shared database, scrape different days,
 # and push — and whichever finished second would overwrite the other's work.
@@ -167,29 +174,43 @@ jobs:
             # clock. Reading `date` here was wrong twice over: scheduled runs
             # start late on shared runners — on 2026-08-24 the :30 cron fired
             # at :35 and again at :29, and the 08:00 one at 08:42 — and the
-            # concurrency queue can hold a run for hours behind another. Every
-            # firing therefore missed the "30" match and silently fell through
-            # to daily, so the backfill schedule never once ran a backfill.
-            # github.event.schedule is the cron string itself and does not move.
+            # concurrency queue can hold a run for hours behind another. So
+            # whether a backfill happened came down to which minute the runner
+            # reached this line on, which is a coin toss: the 12:30 firing that
+            # day landed on :30 exactly and did run one, and the others did
+            # not. github.event.schedule is the cron string itself, and it does
+            # not move no matter how late the run starts.
             case "${{ github.event.schedule }}" in
               '30 */6 * * *') MODE=backfill ;;
               '0 9 1 * *')    MODE=monthly  ;;
               *)              MODE=daily    ;;
             esac
           fi
-          echo "mode: $MODE (schedule='${{ github.event.schedule }}')"
+
+          # `plan` is a backfill that prices the work and stops. Kept as a mode
+          # rather than a separate input so the choice list is the whole set of
+          # things this workflow can do.
+          PLAN=""
+          if [ "$MODE" = "plan" ]; then MODE=backfill; PLAN="--plan"; fi
+          echo "mode: $MODE $PLAN (schedule='${{ github.event.schedule }}')"
 
           if [ "$MODE" = "backfill" ]; then
             START="${{ inputs.start }}"
             END="${{ inputs.end }}"
             REGIONS="${{ inputs.regions }}"
             # Only the backfill narrows the site list. The daily scrape works
-            # one county with no SCRAPE_SCOPE, so the same setting there would
-            # rank sites within that county and keep a different four hundred
-            # than the statewide ranking does — two definitions of "the busiest
-            # sites" writing into one database.
-            export TOP_HOTSPOTS="${{ inputs.top_hotspots || '400' }}"
-            echo "sites: top $TOP_HOTSPOTS hotspots"
+            # one county with no SCRAPE_SCOPE, so the same settings there would
+            # rank sites within that county and keep a different set than the
+            # statewide ranking does — two definitions of "the busiest sites"
+            # writing into one database.
+            #
+            # The default is coverage rather than volume: ten sites in every
+            # county, so the map has somewhere to point at anywhere in the
+            # state. Set top_hotspots instead to optimise for records per call.
+            export TOP_HOTSPOTS="${{ inputs.top_hotspots || '0' }}"
+            export PER_COUNTY_HOTSPOTS="${{ inputs.per_county_hotspots || '10' }}"
+            export MAX_COUNTIES="${{ inputs.max_counties || '0' }}"
+            echo "sites: per-county=$PER_COUNTY_HOTSPOTS overall=$TOP_HOTSPOTS counties=$MAX_COUNTIES"
             # A scheduled backfill has no inputs, so it falls back to the
             # standing range: the last twelve months across the configured
             # regions. The script trims the end date to what has settled and
@@ -203,7 +224,7 @@ jobs:
             # days already stored, so running it again continues where it
             # stopped rather than starting over.
             python -u pipeline/backfill.py "$START" "$END" \
-              --regions "$REGIONS" --budget-min "$BUDGET_MIN"
+              --regions "$REGIONS" --budget-min "$BUDGET_MIN" $PLAN
           else
             python -u pipeline/run.py "$MODE"
           fi
