@@ -24,6 +24,7 @@ Note this is *not* numSpeciesAllTime, which is species richness. A quiet marsh
 can out-rank a busy city park on species and be nearly empty of checklists.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import ebird_api                                          # noqa: E402
 
 CACHE = ROOT / "data" / "hotspots_ref"
+
+# How many of the busiest sites to scrape, across the whole scrape scope.
+# Zero means every hotspot, which is the behaviour this had before the
+# narrowing existed — see selection() for why a cap is wanted at all. Read
+# here rather than in each caller so the scraper and the work-queue planner
+# cannot disagree about which sites are in scope.
+TOP_HOTSPOTS = int(os.getenv("TOP_HOTSPOTS", "0"))
 
 
 def fetch(region):
@@ -106,6 +114,61 @@ def load(region, refresh=False):
 def ids(region):
     """Just the locIds, as a set — for deciding whether a checklist counts."""
     return {h["loc_id"] for h in load(region)}
+
+
+def expand(spec):
+    """'US-PA' -> its counties; 'US-PA-003,US-PA-101' -> that list.
+
+    A state code has one hyphen, a county code two, so which was meant can be
+    read off the string rather than asked for separately.
+    """
+    out = []
+    for p in (s.strip() for s in spec.split(",")):
+        if p:
+            out.extend(counties(p) if p.count("-") == 1 else [p])
+    return out
+
+
+def selection(spec):
+    """The TOP_HOTSPOTS busiest sites across `spec`, as {region: {loc_id}}.
+
+    WHY NARROW AT ALL
+    Scraping every hotspot in Pennsylvania for a year is about 207,000
+    checklist views, and eBird answers a sustained pull with 429s carrying a
+    Retry-After of six or seven seconds — so the real cost is closer to seven
+    seconds a checklist than the 0.5 s SCRAPE_DELAY suggests. That is roughly
+    three weeks of runner time for one state-year, which is not a thing that
+    finishes.
+
+    Birding is concentrated enough that most of it is not needed. In Allegheny
+    the top 100 of 273 hotspots hold 91% of all checklists ever filed, and two
+    parks alone hold 21%. Taking the head of that distribution statewide buys
+    most of the record for a fraction of the calls, and the sites it keeps are
+    the ones the app is asked about anyway — a hotspot with nine all-time
+    checklists cannot support a site effect worth serving.
+
+    Ranked across the whole spec rather than per county on purpose: a fixed
+    number per county would spend the same budget on Forest County, four
+    checklists on a good day, as on Philadelphia.
+
+    Returns None when TOP_HOTSPOTS is unset or zero, meaning "no narrowing" —
+    callers treat that as "keep everything" rather than "keep nothing".
+    Regions with no selected site are absent from the mapping, which is what
+    lets a caller skip their feed calls entirely.
+    """
+    if TOP_HOTSPOTS <= 0:
+        return None
+
+    # Keyed by the region we will actually scrape rather than by the hotspot's
+    # own subnational2Code: the two normally agree, but the code is missing on
+    # a few sites and a None key would quietly drop them.
+    ranked = sorted(((r, h) for r in expand(spec) for h in load(r)),
+                    key=lambda rh: -rh[1]["n_checklists"])
+
+    chosen = {}
+    for region, h in ranked[:TOP_HOTSPOTS]:
+        chosen.setdefault(region, set()).add(h["loc_id"])
+    return chosen
 
 
 def counties(state):

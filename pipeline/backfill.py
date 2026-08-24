@@ -65,6 +65,15 @@ STATE_PER_DAY = float(os.getenv("STATE_PER_DAY", "580"))
 # cancellation costs minutes rather than an hour, while still not shipping the
 # whole database to Hugging Face every ninety seconds.
 CHUNK = int(os.getenv("BACKFILL_CHUNK", "15"))
+# Seconds per call for the estimate, and NOT the same thing as SCRAPE_DELAY.
+# The delay is what we wait between calls; this is what a call actually costs
+# once eBird starts refusing them. A statewide run on 2026-08-24 took 329
+# minutes to fetch about 2,700 checklists — 2,632 of those calls came back 429
+# with a Retry-After of six or seven seconds, so the sustained rate was 7.3 s
+# per checklist against the 0.5 s the delay implies. Estimating at the delay
+# under-priced a full state-year by fourteen times, which is the difference
+# between a two-day backfill and a three-week one.
+SEC_PER_CALL = float(os.getenv("SEC_PER_CALL", "7.3"))
 # Stop this many minutes in. The job's own ceiling is 330; leaving half an hour
 # means the last chunk and its push finish inside it.
 BUDGET_MIN = int(os.getenv("BUDGET_MIN", "300"))
@@ -98,18 +107,34 @@ def expand(spec):
     Ordered busiest first, using eBird's own all-time checklist counts per
     hotspot summed by county. A partial run then leaves whole high-traffic
     counties finished instead of every county part-done.
+
+    When TOP_HOTSPOTS narrows the scrape, counties holding none of the chosen
+    sites are dropped from the queue entirely rather than left in it to
+    contribute a feed call a day that can only be discarded — across a year
+    that alone is one call per county per day for counties we would keep
+    nothing from. Volume is then counted over the selected sites only, so the
+    ordering and the estimate both describe the work actually queued.
     """
     import hotspots_ref
 
-    parts = [s.strip() for s in spec.split(",") if s.strip()]
-    regions = []
-    for p in parts:
-        regions.extend(hotspots_ref.counties(p) if p.count("-") == 1 else [p])
+    regions = hotspots_ref.expand(spec)
+    selected = hotspots_ref.selection(spec)
+    if selected is not None:
+        regions = [r for r in regions if selected.get(r)]
 
     volume = {}
     for r in regions:
-        volume[r] = sum(h["n_checklists"] for h in hotspots_ref.load(r))
-    return sorted(regions, key=lambda r: -volume.get(r, 0)), volume
+        keep = selected.get(r) if selected is not None else None
+        volume[r] = sum(h["n_checklists"] for h in hotspots_ref.load(r)
+                        if keep is None or h["loc_id"] in keep)
+
+    # The denominator for the estimate is every hotspot in the spec, narrowed
+    # or not, because STATE_PER_DAY was measured against the unnarrowed state.
+    # Normalising against the selected total instead would re-inflate the
+    # figure to the full state's daily volume and hide the whole saving.
+    everything = sum(sum(h["n_checklists"] for h in hotspots_ref.load(r))
+                     for r in hotspots_ref.expand(spec))
+    return sorted(regions, key=lambda r: -volume.get(r, 0)), volume, everything
 
 
 def parse(s):
@@ -146,12 +171,20 @@ if __name__ == "__main__":
         end = settled
 
     (ROOT / "data").mkdir(exist_ok=True)
-    regions, volume = expand(a.regions)
+    regions, volume, all_volume = expand(a.regions)
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     have = already_have()
 
     # region-major: finish a county before starting the next one
     todo = [(r, d) for r in regions for d in days if (r, d) not in have]
+
+    import hotspots_ref
+    if hotspots_ref.TOP_HOTSPOTS > 0:
+        share = (sum(volume.values()) / all_volume) if all_volume else 0
+        print(f"sites      top {hotspots_ref.TOP_HOTSPOTS:,} hotspots, "
+              f"{share:.0%} of all recorded birding in {a.regions}, "
+              f"in {len(regions)} of {len(hotspots_ref.expand(a.regions))} "
+              f"counties")
 
     print(f"regions    {len(regions)}  ({', '.join(regions[:4])}"
           f"{' ...' if len(regions) > 4 else ''})")
@@ -174,14 +207,17 @@ if __name__ == "__main__":
     # Each county's share of the state's all-time hotspot checklists is used as
     # its share of current activity, scaled by the rate we actually measured in
     # Allegheny: 42 hotspot checklists a day at 7.2% of the state's volume.
-    total_vol = sum(volume.values()) or 1
-    per_day = {r: max(1.0, (volume.get(r, 0) / total_vol) * STATE_PER_DAY)
+    #
+    # Divided by every hotspot in the spec rather than by the selected ones, so
+    # that narrowing the site list shows up here as a smaller number instead of
+    # being normalised back out.
+    per_day = {r: max(1.0, (volume.get(r, 0) / (all_volume or 1)) * STATE_PER_DAY)
                for r in regions}
     views = sum(per_day[r] for r, _ in todo)
     calls = len(todo) + views          # one feed per unit, one view per checklist
     print(f"estimate   ~{calls:,.0f} eBird calls "
           f"({len(todo):,} feeds + ~{views:,.0f} checklists), "
-          f"~{calls * 0.5 / 3600:.0f} h at 0.5 s between them")
+          f"~{calls * SEC_PER_CALL / 3600:.0f} h at {SEC_PER_CALL} s a call")
     print(f"           excludes hotspot fan-out on capped days")
     print(f"budget     {a.budget_min} min this run\n", flush=True)
 
@@ -213,8 +249,13 @@ if __name__ == "__main__":
                 [{"date": str(d), "kind": "backfill", "wind_max": 0.0}
                  for d in dates], indent=2))
             try:
-                run("scrape_ebird.py", env={"SCRAPE_REGION": region})
-                run("backfill_locations.py", env={"SCRAPE_REGION": region})
+                # SCRAPE_SCOPE is the whole spec, not this county: the site
+                # ranking has to be the same one the work queue was built
+                # from, and a child that only saw its own county would rank
+                # within it and keep a different set of sites each chunk.
+                env = {"SCRAPE_REGION": region, "SCRAPE_SCOPE": a.regions}
+                run("scrape_ebird.py", env=env)
+                run("backfill_locations.py", env=env)
             finally:
                 run("sync_db.py", "push")
             done += len(dates)
