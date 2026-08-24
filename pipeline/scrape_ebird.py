@@ -26,9 +26,30 @@ load_dotenv(ROOT / ".env")
 # them and died on the first 429 it met.
 sys.path.insert(0, str(Path(__file__).parent))
 import ebird_api                                          # noqa: E402
+import hotspots_ref                                       # noqa: E402
 from ebird_api import get                                 # noqa: E402
 
-REGION = os.getenv("SCRAPE_REGION", "US-PA-003")  # Allegheny County
+# One county, or several: "US-PA-003" or "US-PA-003,US-PA-101,US-PA-029".
+REGIONS = [r.strip() for r in
+           os.getenv("SCRAPE_REGION", "US-PA-003").split(",") if r.strip()]
+
+# eBird's ceiling on /product/lists. Not a number we chose, and not one the
+# response admits to — a truncated day looks exactly like a day with 200
+# checklists on it.
+CAP = 200
+
+# Hotspots with almost no history are not worth a call on a capped day: in
+# Allegheny, dropping everything under ten all-time checklists skips 22 of 273
+# sites and loses 0.09% of the county's recorded birding.
+MIN_HOTSPOT_HISTORY = int(os.getenv("MIN_HOTSPOT_HISTORY", "10"))
+
+# Keep only checklists filed at public hotspots — parks, reserves, wildlife
+# areas. Personal locations are somebody's garden: eBird will not enumerate
+# them, so they cannot be scraped completely on a capped day, and the app
+# never forecasts for them either. Restricting the population makes the
+# training data match what the app actually predicts for.
+HOTSPOTS_ONLY = os.getenv("HOTSPOTS_ONLY", "0") == "1"
+
 DB = ROOT / "data" / "birding.duckdb"
 DAYS = ROOT / "data" / "scrape_days.json"
 DELAY = ebird_api.DELAY
@@ -61,7 +82,59 @@ CREATE TABLE IF NOT EXISTS observations (
 """
 
 
-def parse(c):
+def day_feed(region, date):
+    """Every checklist filed in a region on one day, cap worked around.
+
+    Returns (items, calls_made, was_capped).
+
+    The plain feed answers with at most CAP checklists and gives no hint that
+    it truncated — a busy May morning and a quiet one both come back looking
+    complete. Whenever it returns exactly CAP we therefore assume it did not
+    finish, and ask again hotspot by hotspot.
+
+    That works because the ceiling is per region, and a single site is nowhere
+    near it: the busiest hotspot in Philadelphia on 10 May 2025 had 79
+    checklists against the county's truncated 200.
+
+    It recovers hotspot checklists completely. Personal locations cannot be
+    enumerated at all, so on a capped day those stay truncated — which is the
+    reason HOTSPOTS_ONLY exists.
+    """
+    y, m, d = str(date).split("-")
+    feed = get(f"/product/lists/{region}/{y}/{m}/{d}", maxResults=CAP) or []
+    if len(feed) < CAP:
+        return feed, 1, False
+
+    seen = {x["subId"]: x for x in feed if x.get("subId")}
+    calls = 1
+    sites = [h for h in hotspots_ref.load(region)
+             if h["n_checklists"] >= MIN_HOTSPOT_HISTORY]
+    print(f"    capped at {CAP} — re-asking {len(sites)} hotspots", flush=True)
+
+    for h in sites:
+        sub = get(f"/product/lists/{h['loc_id']}/{y}/{m}/{d}",
+                  maxResults=CAP) or []
+        calls += 1
+        for x in sub:
+            if x.get("subId"):
+                seen.setdefault(x["subId"], x)
+
+    print(f"    recovered {len(seen)} checklists ({len(seen) - CAP:+d}) "
+          f"in {calls} calls", flush=True)
+    return list(seen.values()), calls, True
+
+
+def is_hotspot(item):
+    """Was this checklist filed at a public hotspot?
+
+    The feed carries the flag on the location, and it is trusted directly
+    rather than checked against the cached hotspot list — a site created since
+    the cache was written would otherwise be misfiled as personal.
+    """
+    return bool((item.get("loc") or {}).get("isHotspot"))
+
+
+def parse(c, region):
     """Checklist-view JSON -> (checklist row, observation rows).
 
     numSpeciesAllReported comes back null, so richness is len(obs).
@@ -75,7 +148,7 @@ def parse(c):
     dt = c.get("obsDt", "")
     date, _, tm = dt.partition(" ")
     row = (
-        c.get("subId"), c.get("locId"), REGION, dt, date or None, tm or None,
+        c.get("subId"), c.get("locId"), region, dt, date or None, tm or None,
         c.get("durationHrs"), c.get("effortDistanceKm"), c.get("numObservers"),
         c.get("protocolId"), c.get("allObsReported"), len(obs),
         c.get("userDisplayName"),
@@ -90,26 +163,33 @@ def parse(c):
     return row, obs_rows
 
 
-def scrape(con, dates):
+def scrape(con, dates, regions):
     seen = {r[0] for r in con.execute("SELECT sub_id FROM checklists").fetchall()}
     print(f"already stored: {len(seen)} checklists\n", flush=True)
-    calls = 0
+    calls = capped_days = 0
+    units = [(r, day) for r in regions for day in dates]
 
-    for i, day in enumerate(dates, 1):
+    for i, (region, day) in enumerate(units, 1):
         d = day["date"]
-        y, m, dd = d.split("-")
-        lists = get(f"/product/lists/{REGION}/{y}/{m}/{dd}", maxResults=200)
-        calls += 1
-        if lists is None:
-            print(f"[{i}/{len(dates)}] {d}  FEED FAILED", flush=True)
+        lists, n, was_capped = day_feed(region, d)
+        calls += n
+        capped_days += was_capped
+        if not lists:
+            print(f"[{i}/{len(units)}] {region} {d}  FEED FAILED OR EMPTY",
+                  flush=True)
             continue
 
-        sub_ids = [x["subId"] for x in lists if x.get("subId")]
+        if HOTSPOTS_ONLY:
+            kept = [x for x in lists if is_hotspot(x)]
+        else:
+            kept = lists
+
+        sub_ids = [x["subId"] for x in kept if x.get("subId")]
         todo = [s for s in sub_ids if s not in seen]
-        print(f"[{i}/{len(dates)}] {d} ({day['kind']:>5}, wind {day['wind_max']:>4.1f}) "
-              f"{len(sub_ids):>4} checklists, {len(todo):>4} new", flush=True)
-        if len(sub_ids) >= 200:
-            print("    WARNING: hit the 200 cap — day is truncated", flush=True)
+        drop = "" if not HOTSPOTS_ONLY else f", {len(lists) - len(kept):>3} personal skipped"
+        print(f"[{i}/{len(units)}] {region} {d} ({day['kind']:>8}) "
+              f"{len(sub_ids):>4} checklists, {len(todo):>4} new{drop}",
+              flush=True)
 
         added = 0
         for j, sub in enumerate(todo, 1):
@@ -117,7 +197,7 @@ def scrape(con, dates):
             calls += 1
             if not c:
                 continue
-            row, obs_rows = parse(c)
+            row, obs_rows = parse(c, region)
             # Columns are named, not positional. `observer` was added by ALTER
             # TABLE after the first scrapes, so it sits at the end of an older
             # database and in the middle of one built from CREATE TABLE. A
@@ -139,12 +219,13 @@ def scrape(con, dates):
                 print(f"    {j}/{len(todo)}  ({calls} calls)", flush=True)
         print(f"    +{added} stored\n", flush=True)
 
-    return calls
+    return calls, capped_days
 
 
 if __name__ == "__main__":
     dates = json.loads(DAYS.read_text())
-    print(f"region  {REGION}")
+    print(f"regions {len(REGIONS)}: {', '.join(REGIONS[:6])}{' ...' if len(REGIONS) > 6 else ''}")
+    print(f"scope   {'hotspots only' if HOTSPOTS_ONLY else 'all locations'}")
     print(f"days    {len(dates)}  ({dates[0]['date']} .. {dates[-1]['date']})")
     print(f"db      {DB}")
     print(f"delay   {DELAY}s\n", flush=True)
@@ -158,7 +239,7 @@ if __name__ == "__main__":
     except duckdb.Error:
         pass
     t0 = time.time()
-    calls = scrape(con, dates)
+    calls, capped_days = scrape(con, dates, REGIONS)
 
     n_ck, n_obs, n_sp, n_loc = con.execute("""
         SELECT (SELECT count(*) FROM checklists),
@@ -168,6 +249,10 @@ if __name__ == "__main__":
     """).fetchone()
 
     print(f"\n=== done in {(time.time()-t0)/60:.1f} min, {calls} calls ===")
+    # Worth stating rather than leaving in the scroll-back: a capped day is one
+    # the plain feed would have silently truncated, and the count is the
+    # clearest signal of how much the hotspot fallback is earning.
+    print(f"  capped days  {capped_days} (re-asked hotspot by hotspot)")
     if n_ck == 0:
         con.close()
         sys.exit("stored zero checklists. Either every requested date returned "

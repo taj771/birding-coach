@@ -1,0 +1,136 @@
+"""Hotspot lists per county, fetched once and cached.
+
+    python pipeline/hotspots_ref.py US-PA-003        one county
+    python pipeline/hotspots_ref.py US-PA            every county in a state
+
+WHY THIS EXISTS
+The day feed caps at 200 checklists per region-day. A county busts that ceiling
+on migration days — Philadelphia, Allegheny and Chester all returned exactly
+200 on 10 May 2025, with no way to know the true total. A single hotspot never
+comes close: the busiest site in Philadelphia that day had 79.
+
+So a capped county-day is re-asked hotspot by hotspot, and that needs a list of
+the county's hotspots. It changes about as often as parks get built, so it is
+fetched once and cached rather than requested per run.
+
+ORDERING
+Sorted by numChecklistsAllTime, descending — eBird's own count of how many
+checklists have ever been filed there. Birding is extremely concentrated: in
+Allegheny the top 100 of 273 hotspots hold 91% of all checklists, and North
+Park and Frick Park alone are 21%. Descending order is what lets the caller
+stop early once the tail stops returning anything.
+
+Note this is *not* numSpeciesAllTime, which is species richness. A quiet marsh
+can out-rank a busy city park on species and be nearly empty of checklists.
+"""
+import json
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).parent.parent
+load_dotenv(ROOT / ".env")
+
+sys.path.insert(0, str(Path(__file__).parent))
+import ebird_api                                          # noqa: E402
+
+CACHE = ROOT / "data" / "hotspots_ref"
+
+
+def fetch(region):
+    """eBird's hotspot list for a region, busiest first."""
+    hs = ebird_api.get(f"/ref/hotspot/{region}", fmt="json")
+    if hs is None:
+        return None
+    hs.sort(key=lambda h: -(h.get("numChecklistsAllTime") or 0))
+    return [{"loc_id": h["locId"],
+             "name": h.get("locName", ""),
+             "lat": h.get("lat"),
+             "lon": h.get("lng"),
+             "county": h.get("subnational2Code"),
+             "n_checklists": h.get("numChecklistsAllTime") or 0,
+             "latest_obs": h.get("latestObsDt")}
+            for h in hs]
+
+
+def split_state(state, refresh=False):
+    """Fetch a whole state once and write one cache file per county.
+
+    /ref/hotspot/US-PA returns all 4,941 Pennsylvania hotspots in a single
+    response, each carrying its subnational2Code. Asking county by county
+    would be 67 calls for the same bytes, so the state call is split locally
+    instead. Counties with no hotspots simply get no file.
+    """
+    CACHE.mkdir(parents=True, exist_ok=True)
+    hs = fetch(state)
+    if hs is None:
+        return 0
+    by_county = {}
+    for h in hs:
+        if h["county"]:
+            by_county.setdefault(h["county"], []).append(h)
+    for county, rows in by_county.items():
+        (CACHE / f"{county}.json").write_text(
+            json.dumps(rows, separators=(",", ":")))
+    return len(by_county)
+
+
+def load(region, refresh=False):
+    """Cached hotspot list for one county. Fetches on first use."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path = CACHE / f"{region}.json"
+    if path.exists() and not refresh:
+        return json.loads(path.read_text())
+
+    # A county cache miss usually means the state has never been fetched, and
+    # fetching the state is the same single call that fills every other county
+    # too. Falling back to the state avoids 67 separate requests the first
+    # time a statewide scrape starts.
+    state = "-".join(region.split("-")[:2])
+    if region != state and split_state(state):
+        if path.exists():
+            return json.loads(path.read_text())
+
+    hs = fetch(region)
+    if hs is None:
+        # Returning empty rather than raising: a county whose hotspot list we
+        # cannot fetch should degrade to the plain county feed, not stop a
+        # scrape that has other counties to get through.
+        print(f"  {region}: hotspot list unavailable", flush=True)
+        return []
+    path.write_text(json.dumps(hs, separators=(",", ":")))
+    return hs
+
+
+def ids(region):
+    """Just the locIds, as a set — for deciding whether a checklist counts."""
+    return {h["loc_id"] for h in load(region)}
+
+
+def counties(state):
+    """County codes for a state, e.g. US-PA -> ['US-PA-001', ...]."""
+    r = ebird_api.get(f"/ref/region/list/subnational2/{state}")
+    if r is None:
+        sys.exit(f"could not list counties for {state}")
+    return [c["code"] for c in r]
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit(__doc__.split("\n\n")[0] + "\n\n"
+                 "usage: hotspots_ref.py <region>   e.g. US-PA-003 or US-PA")
+
+    target = sys.argv[1]
+    regions = counties(target) if target.count("-") == 1 else [target]
+    print(f"{len(regions)} region(s)\n")
+
+    total = 0
+    for i, region in enumerate(regions, 1):
+        hs = load(region, refresh="--refresh" in sys.argv)
+        total += len(hs)
+        top = hs[0]["name"][:44] if hs else "-"
+        print(f"[{i}/{len(regions)}] {region}  {len(hs):>4} hotspots   "
+              f"busiest: {top}", flush=True)
+
+    print(f"\n{total:,} hotspots cached in {CACHE}")
