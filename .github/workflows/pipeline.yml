@@ -39,7 +39,10 @@ on:
         default: '0'
       per_county_hotspots:
         description: 'backfill only — busiest N hotspots in EACH county (0 = all)'
-        default: '10'
+        default: '20'
+      every:
+        description: 'backfill only — sample one day per N (7 = weekly, 1 = every day)'
+        default: '7'
       max_counties:
         description: 'backfill only — visit only the busiest N counties (0 = all)'
         default: '0'
@@ -208,9 +211,17 @@ jobs:
             # county, so the map has somewhere to point at anywhere in the
             # state. Set top_hotspots instead to optimise for records per call.
             export TOP_HOTSPOTS="${{ inputs.top_hotspots || '0' }}"
-            export PER_COUNTY_HOTSPOTS="${{ inputs.per_county_hotspots || '10' }}"
+            export PER_COUNTY_HOTSPOTS="${{ inputs.per_county_hotspots || '20' }}"
             export MAX_COUNTIES="${{ inputs.max_counties || '0' }}"
+            # These defaults are load-bearing, not cosmetic. A scheduled run
+            # passes no inputs, and the cron is what actually finishes a
+            # multi-day backfill — so if the defaults here differ from the
+            # dispatch that started the job, the schedule quietly works on a
+            # different problem: a different site list, or every day instead of
+            # one a week. Change them together or not at all.
+            export EVERY="${{ inputs.every || '7' }}"
             echo "sites: per-county=$PER_COUNTY_HOTSPOTS overall=$TOP_HOTSPOTS counties=$MAX_COUNTIES"
+            echo "days:  one per $EVERY"
             # A scheduled backfill has no inputs, so it falls back to the
             # standing range: the last twelve months across the configured
             # regions. The script trims the end date to what has settled and
@@ -224,7 +235,8 @@ jobs:
             # days already stored, so running it again continues where it
             # stopped rather than starting over.
             python -u pipeline/backfill.py "$START" "$END" \
-              --regions "$REGIONS" --budget-min "$BUDGET_MIN" $PLAN
+              --regions "$REGIONS" --budget-min "$BUDGET_MIN" \
+              --every "$EVERY" $PLAN
           else
             python -u pipeline/run.py "$MODE"
           fi

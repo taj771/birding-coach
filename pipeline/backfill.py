@@ -77,6 +77,10 @@ SEC_PER_CALL = float(os.getenv("SEC_PER_CALL", "7.3"))
 # Stop this many minutes in. The job's own ceiling is 330; leaving half an hour
 # means the last chunk and its push finish inside it.
 BUDGET_MIN = int(os.getenv("BUDGET_MIN", "300"))
+# The wall the runner enforces, not one we choose: the job's timeout-minutes is
+# 330 and being killed there loses the current chunk. Kept below it with enough
+# room for the final push and the summary.
+HARD_MIN = int(os.getenv("HARD_MIN", "315"))
 
 
 def run(script, *args, env=None):
@@ -85,6 +89,56 @@ def run(script, *args, env=None):
                        env={**os.environ, **(env or {})})
     if r.returncode != 0:
         sys.exit(f"{script} failed with code {r.returncode}")
+
+
+def sample_days(start, end, every):
+    """Dates from start to end, one per `every`-day block. every=1 is all.
+
+    WHY SAMPLE AT ALL
+    Week enters the model as a categorical — fit_logit does `week = doy // 7`
+    and fits a coefficient per week — so a week with no checklists has no
+    coefficient and cannot be forecast at all. There is no borrowing from
+    neighbouring weeks. That makes a thin sample spread over the whole year
+    worth far more than a dense block of it: three contiguous months would
+    leave forty of the fifty-three week cells permanently unfittable.
+
+    WHY IT GROUPS BY THE MODEL'S OWN WEEK
+    The obvious implementation — every Nth day from the start date — fails
+    twice. It lands on the same weekday all year, and birding is emphatically
+    not weekday-invariant: weekend mornings carry far more checklists, by
+    different people, walking further. Train on Sundays, get asked about
+    Tuesdays.
+
+    Rotating the offset fixes the weekday but introduces a subtler bug. An
+    effective stride of eight days drifts against `doy // 7`, whose boundaries
+    are fixed by the calendar, so roughly one week in eight gets no sample at
+    all while its neighbour gets two. Measured over a year: 44 of 53 week
+    cells covered. Nine unfittable weeks, from a routine that exists purely to
+    make every week fittable.
+
+    So group by the week index the model actually uses and take one day from
+    each, stepping which day through the group. Full week coverage by
+    construction rather than by arithmetic that happens to work out.
+    """
+    if every < 1:
+        sys.exit(f"--every must be at least 1, got {every}")
+    days = [start + timedelta(days=i)
+            for i in range((end - start).days + 1)]
+    if every == 1:
+        return days
+    if every < 7:
+        # Below a week there is at least one sample per week whatever the
+        # phase, so plain striding is safe — and 2..6 are all coprime with 7,
+        # which walks the weekday round on its own.
+        return days[::every]
+
+    by_week = {}
+    for d in days:
+        by_week.setdefault((d.year, d.timetuple().tm_yday // 7), []).append(d)
+
+    step = max(1, round(every / 7))
+    return [ds[k % len(ds)]
+            for k, ds in enumerate(sorted(by_week.values())[::step])]
 
 
 def stored_by_region():
@@ -185,6 +239,8 @@ if __name__ == "__main__":
     # run rather than during one.
     p.add_argument("--plan", action="store_true",
                    help="print the plan and the estimate, then exit")
+    p.add_argument("--every", type=int, default=int(os.getenv("EVERY", "1")),
+                   help="sample one day per N (7 = weekly); 1 scrapes them all")
     a = p.parse_args()
 
     t0 = time.time()
@@ -223,7 +279,7 @@ if __name__ == "__main__":
     run("sync_db.py", "pull")
 
     regions, volume, all_volume = expand(a.regions)
-    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    days = sample_days(start, end, a.every)
     have = already_have()
 
     # region-major: finish a county before starting the next one
@@ -307,16 +363,37 @@ if __name__ == "__main__":
     done = stopped = 0
     for i in range(0, len(todo), CHUNK):
         spent = (time.time() - t0) / 60
+        batch = todo[i:i + CHUNK]
+
+        # Two ways to decide to stop, and the second one is why this is not
+        # just the budget check.
+        #
+        # The budget is only consulted here, between chunks, and a chunk takes
+        # over an hour. So a chunk starting at minute 299 of a 300-minute
+        # budget runs to minute 380 — against a job the runner kills at 330,
+        # losing everything that chunk had fetched since the last push. Both
+        # runs on 2026-08-24 survived that on luck: one stopped at 324 min and
+        # finished at 329, a single minute inside the ceiling.
+        #
+        # So refuse to *start* a chunk that cannot finish. The rate comes from
+        # this run rather than a constant, because it varies by county — a
+        # chunk of Philadelphia days is not a chunk of Forest County days.
+        why = None
         if spent > a.budget_min:
+            why = f"time budget reached at {spent:.0f} min"
+        elif done and spent + (spent / done) * len(batch) > HARD_MIN:
+            why = (f"next chunk would run past {HARD_MIN} min "
+                   f"(at {spent:.0f} min, ~{(spent / done) * len(batch):.0f} "
+                   f"min for {len(batch)} more)")
+        if why:
             # Deliberate stop rather than being killed mid-chunk: everything
             # up to here has been pushed, and the next run picks the rest up
             # from the database instead of from a plan it has to remember.
-            print(f"\n{'#' * 60}\n#  time budget reached at {spent:.0f} min — "
-                  f"stopping cleanly\n{'#' * 60}", flush=True)
+            print(f"\n{'#' * 60}\n#  {why} — stopping cleanly\n{'#' * 60}",
+                  flush=True)
             stopped = 1
             break
 
-        batch = todo[i:i + CHUNK]
         # A chunk is one region at a time: scrape_ebird takes SCRAPE_REGION,
         # and mixing counties inside a chunk would mean the day list no longer
         # describes what is being fetched.
