@@ -136,9 +136,21 @@ def sample_days(start, end, every):
     for d in days:
         by_week.setdefault((d.year, d.timetuple().tm_yday // 7), []).append(d)
 
+    # WHY THE PICK IS A FUNCTION OF THE WEEK AND NOT OF ITS POSITION
+    # A scheduled backfill has no start date of its own: it asks for the last
+    # twelve months, so `start` moves forward every single day. Choosing the
+    # day by how far through the range its week sits meant that shifting the
+    # range by one day re-picked every week. Measured: three days of drift left
+    # one day in common out of fifty-three, and seven days left none at all.
+    #
+    # Which does not fail loudly. already_have() would find the newly chosen
+    # days unscraped and scrape them, so the job would keep working, keep
+    # pushing, and never converge — outstanding would fall all day and be back
+    # up by morning. Anchoring the choice to the calendar week itself makes the
+    # sample the same set whatever start and end happen to be.
     step = max(1, round(every / 7))
-    return [ds[k % len(ds)]
-            for k, ds in enumerate(sorted(by_week.values())[::step])]
+    return [ds[(year * 53 + week) % len(ds)]
+            for (year, week), ds in sorted(by_week.items())[::step]]
 
 
 def stored_by_region():
