@@ -42,9 +42,27 @@ def modelled_sites():
 
 
 def names(region):
-    r = requests.get(f"https://api.ebird.org/v2/ref/hotspot/{region}",
+    """locId -> hotspot record, for every hotspot in the region's STATE.
+
+    Asked of the state, not the county. This looked up one county's hotspot
+    list and silently dropped any modelled site missing from it — which was
+    invisible while the model was one county and destroyed the release the
+    moment it was not. The 2026-08-26 refit fitted sites across sixteen
+    counties, found 118 of its 155 sites absent from Allegheny's list, skipped
+    them, and published 37 hotspots where the previous model had 209.
+
+    Nothing downstream could catch it. hotspots.json is what the app tests
+    coverage against, so shrinking it shrank the forecastable area, the map
+    extent derived from it, and the postal codes derived from that — all
+    consistently, all wrong, and all reported as a successful run.
+
+    /ref/hotspot/US-PA returns every hotspot in the state in one call, which is
+    the same cost as one county and cannot go stale by geography.
+    """
+    state = "-".join(region.split("-")[:2])
+    r = requests.get(f"https://api.ebird.org/v2/ref/hotspot/{state}",
                      headers={"X-eBirdApiToken": os.environ["EBIRD_API_KEY"].strip()},
-                     params={"fmt": "json"}, timeout=60)
+                     params={"fmt": "json"}, timeout=90)
     r.raise_for_status()
     return {h["locId"]: h for h in r.json()}
 
@@ -68,9 +86,25 @@ if __name__ == "__main__":
 
     missing = [s for s in sites if s not in ref]
     if missing:
-        # a hotspot can be retired or moved between regions after we scraped it
+        # a hotspot can be retired or merged after we scraped it, so a few
+        # missing is ordinary attrition
         print(f"warning: {len(missing)} modelled sites have no current eBird "
               f"entry and are skipped: {missing[:5]}")
+
+    # ...but a large share missing is not attrition, it is the lookup being
+    # wrong — asking the wrong region, a bad key, a truncated response. That
+    # happened on 2026-08-26 and published 37 hotspots in place of 209, which
+    # then shrank the coverage, the extent and the postal code list in step,
+    # while the run reported success. Refuse instead: this file is what the app
+    # tests coverage against, and quietly emitting a fraction of it is worse
+    # than emitting nothing.
+    if sites and len(missing) > 0.2 * len(sites):
+        sys.exit(
+            f"{len(missing)} of {len(sites)} modelled sites are absent from the "
+            f"eBird reference for {'-'.join(REGION.split('-')[:2])}.\n"
+            "That is too many to be hotspots going out of service. Check that "
+            "the reference covers every county the model was fitted on before "
+            "publishing a hotspot list this incomplete.")
     rows = [f"  ('{s}', '{q(ref[s]['locName'])}', {ref[s]['lat']:.6f}, "
             f"{ref[s]['lng']:.6f}, {n.get(s, 0)})"
             for s in sites if s in ref]
