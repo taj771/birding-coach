@@ -20,6 +20,7 @@ LAYOUT
     hotspots.json           192 sites with coordinates and visit counts
     meta.json               when it was fitted, and on how much
     coef/<species>.json     one file per species, about 4 KB gzipped
+    calibration.json        how the PREVIOUS model scored on data it never saw
 
 Split per species on purpose: the whole model is 207 KB gzipped, a single
 species is under 4 KB, and the app only ever needs the one the user picked.
@@ -175,6 +176,27 @@ def build(models, names):
         "modelled_weeks": weeks,
         "modelled_hours": hours,
     }, indent=1))
+
+    # The report card on the model this one is replacing, carried forward so
+    # the claim and its check travel together. Published rather than left in a
+    # run log because a calibration number nobody can see is a number nobody
+    # acts on — and because a user is entitled to ask how often "40%" turns out
+    # to mean 40%.
+    #
+    # Deliberately the PREVIOUS model's result: eval_calibration.py runs before
+    # the refit, since the only honest hold-out is data the fitted model never
+    # saw. So calibration.json always describes the model published last month,
+    # not the one in the same folder. The `model_fitted_at` field inside it says
+    # which, and it will not match meta.json's `fitted_at`.
+    cal = DATA / "calibration.json"
+    if cal.exists():
+        (BUNDLE / "calibration.json").write_text(cal.read_text())
+        print(f"  calibration.json carried forward "
+              f"({json.loads(cal.read_text()).get('verdict', '?')})")
+    else:
+        print("  no calibration.json — eval has not run yet, or had too "
+              "little held-out data")
+
     return hs, weeks
 
 

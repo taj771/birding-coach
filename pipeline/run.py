@@ -32,10 +32,24 @@ LAG_DAYS = 7
 WINDOW_DAYS = 7
 
 
-def run(script, *args):
+def run(script, *args, check=True):
+    """Run a pipeline step. check=False lets a step fail without ending the run.
+
+    Only the measuring steps get check=False. Anything that produces or
+    publishes must still be fatal — a refit that half-works and carries on is
+    how a bad model reaches the app. But an eval that cannot run, because there
+    is not enough held-out data yet or the public dataset is briefly
+    unreachable, should say so and let the refit proceed. An eval with the
+    power to block a release is an eval that gets commented out the first time
+    it is inconvenient.
+    """
     print(f"\n{'=' * 60}\n  {script} {' '.join(args)}\n{'=' * 60}", flush=True)
     r = subprocess.run([PY, str(ROOT / "pipeline" / script), *args])
     if r.returncode != 0:
+        if not check:
+            print(f"\n::warning::{script} exited {r.returncode} — continuing, "
+                  f"because this step measures rather than produces.", flush=True)
+            return
         sys.exit(f"{script} failed with code {r.returncode}")
 
 
@@ -66,6 +80,19 @@ if __name__ == "__main__":
 
     if mode in ("monthly", "all"):
         run("build_model_table.py")     # + weather, one row per checklist
+
+        # Before the refit, never after. This scores the model currently
+        # published against every checklist scraped since it was fitted —
+        # data it could not have seen. Refit first and that same data is
+        # training data, the hold-out disappears, and the number becomes a
+        # measure of how well a model fits what it was fitted on.
+        #
+        # So each month ends with a report card on the model that was being
+        # served, issued just before it is replaced. Failing here does not
+        # stop the refit: an eval that can block publishing is an eval people
+        # start skipping.
+        run("eval_calibration.py", check=False)
+
         run("fit_logit.py")             # -> data/model_coefficients.json
         run("export_hotspots.py")       # the sites that carry their own effect
         run("fetch_photos.py")          # a picture per species per month
