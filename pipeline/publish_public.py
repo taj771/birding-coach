@@ -30,6 +30,8 @@ import os
 import re
 import shutil
 import sys
+
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,6 +70,69 @@ def flat(m):
         for k, v in (meta.get(split) or {}).items():
             out[f"meta_{split}_{k}"] = float(v)
     return out
+
+
+GAZ_URL = ("https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+           "2023_Gazetteer/2023_Gaz_zcta_national.zip")
+GAZ_CACHE = DATA / "gaz_zcta.txt"
+# How far outside the hotspots to keep postal codes. Someone just beyond the
+# edge should be able to type their code and be told they are out of coverage,
+# which is a useful answer. "Postal code not found" is not — it reads as a
+# broken search box rather than a limit of the model.
+ZIP_MARGIN_DEG = 0.6
+
+
+def write_zips(hs):
+    """Postal code centroids near the coverage, for the map's location box.
+
+    Bundled rather than looked up at runtime. A geocoding service would work,
+    but it puts a third party between a user typing their postal code and the
+    map moving — one more thing to be rate limited, blocked by CORS, or simply
+    down. This is 70 KB of static JSON served from the same place as the model,
+    it works offline, and it cannot start charging.
+
+    Source is the Census ZCTA gazetteer, public domain. Spot-checked against an
+    independent geocoder: 15217 resolves to 40.4308, -79.9201 here and
+    40.4308, -79.9205 there.
+
+    Filtered to the bounding box of the fitted hotspots plus a margin, so this
+    grows with the model instead of being pinned to a hand-typed list of
+    prefixes. ZCTAs cross state lines and the file carries no state column, so
+    geography is the only honest filter anyway.
+    """
+    import io
+    import zipfile
+
+    if not GAZ_CACHE.exists():
+        print("  fetching the ZCTA gazetteer (once)...", flush=True)
+        r = requests.get(GAZ_URL, timeout=180)
+        r.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            name = next(n for n in z.namelist() if n.endswith(".txt"))
+            GAZ_CACHE.write_bytes(z.read(name))
+
+    lats = [h["latitude"] for h in hs]
+    lons = [h["longitude"] for h in hs]
+    lo_la, hi_la = min(lats) - ZIP_MARGIN_DEG, max(lats) + ZIP_MARGIN_DEG
+    lo_lo, hi_lo = min(lons) - ZIP_MARGIN_DEG, max(lons) + ZIP_MARGIN_DEG
+
+    out = {}
+    with GAZ_CACHE.open() as f:
+        header = [c.strip() for c in f.readline().split("\t")]
+        gi, la_i, lo_i = (header.index("GEOID"), header.index("INTPTLAT"),
+                          header.index("INTPTLONG"))
+        for line in f:
+            p = line.split("\t")
+            try:
+                la, lo = float(p[la_i]), float(p[lo_i])
+            except ValueError:
+                continue
+            if lo_la <= la <= hi_la and lo_lo <= lo <= hi_lo:
+                out[p[gi].strip()] = [round(la, 4), round(lo, 4)]
+
+    (BUNDLE / "zips.json").write_text(json.dumps(out, separators=(",", ":")))
+    print(f"  zips.json: {len(out):,} postal codes near the coverage "
+          f"({(BUNDLE / 'zips.json').stat().st_size / 1024:.0f} KB)")
 
 
 def species_names(codes):
@@ -168,6 +233,7 @@ def build(models, names):
 
     hs = hotspots()
     (BUNDLE / "hotspots.json").write_text(json.dumps(hs, separators=(",", ":")))
+    write_zips(hs)
 
     weeks = sorted(int(w) for w in next(iter(models.values()))["week"])
     hours = sorted(int(h) for h in next(iter(models.values()))["hour"])
