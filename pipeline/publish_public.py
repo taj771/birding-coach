@@ -82,6 +82,65 @@ GAZ_CACHE = DATA / "gaz_zcta.txt"
 ZIP_MARGIN_DEG = 0.6
 
 
+def describe_coverage(hs):
+    """region, region_name and extent, read off what was actually fitted.
+
+    The extent is the bounding box of the sites that carry their own effect,
+    which is the only defensible answer: it is exactly the area the map should
+    frame, and it moves by itself as counties land.
+
+    The name comes from the counties present in the database. One county gets
+    its proper name because that reads better than a code; several get a count,
+    because listing thirteen counties in a header helps nobody and naming the
+    state would overclaim while two thirds of it is still empty.
+
+    Note this is a claim about where data exists, NOT about where a forecast
+    can be given. Coverage is decided per point by distance to the nearest
+    site — see coverage_radius_km. A statewide extent with holes in it is
+    normal and the app is built to handle it.
+    """
+    lats = [h["latitude"] for h in hs]
+    lons = [h["longitude"] for h in hs]
+    extent = {"latMin": round(min(lats), 4), "latMax": round(max(lats), 4),
+              "lonMin": round(min(lons), 4), "lonMax": round(max(lons), 4)}
+
+    counties = []
+    db = DATA / "birding.duckdb"
+    if db.exists():
+        try:
+            import duckdb
+            con = duckdb.connect(str(db), read_only=True)
+            counties = [r[0] for r in con.execute(
+                "select distinct region from checklists "
+                "where region is not null order by 1").fetchall()]
+            con.close()
+        except Exception as e:      # noqa: BLE001 — naming must never block a release
+            print(f"  ::warning::could not read counties ({type(e).__name__}); "
+                  "falling back to the extent alone")
+
+    if len(counties) == 1:
+        code = counties[0]
+        name = code
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            import ebird_api
+            info = ebird_api.get(f"/ref/region/info/{code}")
+            if info and info.get("result"):
+                name = info["result"]
+            elif info and info.get("name"):
+                name = f"{info['name']}, Pennsylvania"
+        except Exception:           # noqa: BLE001
+            pass
+        return {"region": code, "region_name": name, "extent": extent}
+
+    if counties:
+        return {"region": "US-PA",
+                "region_name": f"Pennsylvania — {len(counties)} counties",
+                "extent": extent}
+
+    return {"region": "US-PA", "region_name": "Pennsylvania", "extent": extent}
+
+
 def write_zips(hs):
     """Postal code centroids near the coverage, for the map's location box.
 
@@ -239,10 +298,13 @@ def build(models, names):
     hours = sorted(int(h) for h in next(iter(models.values()))["hour"])
     (BUNDLE / "meta.json").write_text(json.dumps({
         "fitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "region": "US-PA-003",
-        "region_name": "Allegheny County, Pennsylvania",
-        "extent": {"latMin": 40.19, "latMax": 40.68,
-                   "lonMin": -80.34, "lonMax": -79.69},
+        # Derived, never typed. These were hardcoded to Allegheny, which was
+        # true when the model was one county and became a lie the moment it
+        # was not — and a lie the app has no way to detect, because the app was
+        # deliberately changed to trust this file. A model spanning thirteen
+        # counties published with an Allegheny extent would send every client
+        # zooming to Pittsburgh and hide most of its own sites.
+        **describe_coverage(hs),
         "species": len(models),
         "hotspots": len(hs),
         "modelled_weeks": weeks,
