@@ -28,6 +28,7 @@ people's gardens — pool into one PERSONAL baseline. They inform the hour,
 effort and weather terms without ever appearing in the app.
 """
 import json
+import os
 import warnings
 from pathlib import Path
 
@@ -46,6 +47,26 @@ OUT = ROOT / "data" / "model_coefficients.json"
 
 MIN_DETECTIONS = 200
 MIN_PER_HOUR = 50
+# A hotspot needs this many checklists before it gets an effect of its own.
+#
+# Hours have had a floor since the start and species have had one, but sites
+# never did — every hotspot got its own coefficient however little stood behind
+# it. That was survivable in one county, where the thin tail was small. It is
+# not survivable statewide: at twenty sites per county across sixty-seven
+# counties, sampled one day a week, the median site holds a handful of
+# checklists and the tail holds two or three.
+#
+# A site effect fitted on three checklists is noise given a name, and the app
+# presents it identically to one fitted on three hundred. Worse, a site where
+# every visit happened to report the species separates — the coefficient runs
+# off and the ridge penalty is all that stops it.
+#
+# Below the floor a site pools into PERSONAL, exactly as a garden does. It
+# still informs the hour, week, effort and weather terms; it just stops
+# claiming to know something particular about itself. The app already handles
+# this case — hasSiteEffect() goes false and the UI says "county-wide
+# estimate" — so nothing downstream needs to change.
+MIN_PER_SITE = int(os.getenv("MIN_PER_SITE", "30"))
 C_RIDGE = 1.0          # inverse penalty strength; 1.0 chosen by CV below
 
 CAT = ["hr", "week", "site"]
@@ -62,6 +83,21 @@ def load():
     m = m[m.hr.isin(per_hour[per_hour >= MIN_PER_HOUR].index)].copy()
     # hotspots are places you can send someone; personal locations are gardens
     m["site"] = np.where(m.is_hotspot, m.loc_id, "PERSONAL")
+
+    # ...but a hotspot with almost nothing behind it is not a place we know
+    # anything about, so it pools into PERSONAL too. Counted on hotspots only:
+    # PERSONAL is already an aggregate and must never be measured against the
+    # floor and folded into itself.
+    hot = m.site != "PERSONAL"
+    per_site = m[hot].groupby("site").size()
+    thin = set(per_site[per_site < MIN_PER_SITE].index)
+    if thin:
+        m["site"] = np.where(m.site.isin(thin), "PERSONAL", m.site)
+        print(f"{len(thin):,} of {len(per_site):,} hotspots pooled into "
+              f"PERSONAL (<{MIN_PER_SITE} checklists); "
+              f"{per_site.loc[list(thin)].sum():,} checklists affected, "
+              f"kept for the other terms")
+
     return m, dropped, per_hour[per_hour >= MIN_PER_HOUR]
 
 

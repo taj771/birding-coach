@@ -40,6 +40,12 @@ load_dotenv(ROOT / ".env")
 DATA = ROOT / "data"
 BUNDLE = DATA / "public_bundle"
 
+# Beyond this from the nearest modelled hotspot, the app should decline rather
+# than fall back to the pooled baseline. Twenty-five kilometres because sites
+# sit roughly ten to twenty apart inside a covered county, so it reaches across
+# a county that has been scraped without reaching into one that has not.
+COVERAGE_RADIUS_KM = float(os.getenv("COVERAGE_RADIUS_KM", "25"))
+
 SCALARS = ("intercept", "log_dur", "log_dist", "n_observers", "traveling",
            "wind_max", "temp_mean", "precip_sum", "cloud_mean")
 
@@ -175,6 +181,24 @@ def build(models, names):
         "hotspots": len(hs),
         "modelled_weeks": weeks,
         "modelled_hours": hours,
+        # How far from a modelled hotspot a forecast still means anything.
+        #
+        # `extent` is a rectangle, and a rectangle stopped being an honest
+        # description of coverage the moment this went past one county. With
+        # Philadelphia in the east and Pittsburgh in the west, the bounding box
+        # covers the whole state — including the northern tier, where there is
+        # no data at all. A user there would pass the box test, match no
+        # hotspot, fall back to the pooled baseline, and be shown a confident
+        # number built from two cities four hundred kilometres apart.
+        #
+        # So the app should test distance to the nearest site in hotspots.json
+        # instead, which describes a ragged coverage shape correctly. Every
+        # coordinate needed for that is already published; only the threshold
+        # was missing.
+        #
+        # extent stays, for framing the map. It must not be used to decide
+        # whether a point can be forecast.
+        "coverage_radius_km": COVERAGE_RADIUS_KM,
     }, indent=1))
 
     # The report card on the model this one is replacing, carried forward so
