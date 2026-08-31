@@ -39,7 +39,28 @@ KEYS = {
     "checklists": ("sub_id",),
     "locations": ("loc_id",),
     "observations": ("sub_id", "species_code"),
+    "scrape_attempts": ("region", "obs_date"),
 }
+
+# Every region-day the backfill has fetched, whether or not it yielded a
+# checklist worth storing.
+#
+# It lives in the shared database rather than beside it for the same reason the
+# checklists do. The ledger is half of what makes a backfill resumable, and a
+# ledger only one machine could see would send every other machine back over
+# days somebody has already paid for — which is the failure this table exists
+# to end, reintroduced one level up.
+# Tables a legitimate push may shrink. See the guard in push().
+PRUNABLE = {"scrape_attempts"}
+
+ATTEMPTS_DDL = """
+create table if not exists scrape_attempts (
+    region     varchar   not null,
+    obs_date   date      not null,
+    scraped_at timestamp not null,
+    primary key (region, obs_date)
+)
+"""
 
 
 def creds():
@@ -74,6 +95,12 @@ def merge(local, incoming):
     remote_tables = {r[0] for r in con.execute(
         "select table_name from information_schema.tables "
         "where table_catalog = 'incoming'").fetchall()}
+
+    # Created before the loop rather than left to whichever side scraped
+    # first. The merge describes the table on both sides, so a remote holding
+    # the ledger and a local without it — a fresh checkout pulling down what CI
+    # has done — would fail on the local describe rather than pull the ledger.
+    con.execute(ATTEMPTS_DDL)
 
     for tbl, keys in KEYS.items():
         if tbl not in remote_tables:
@@ -167,8 +194,15 @@ def push(repo, token):
     api = HfApi(token=token)
     there, here = remote_counts(api, repo), counts(DB)
     if there:
+        # PRUNABLE is exempt because the premise above does not hold for it.
+        # scrape_attempts is bookkeeping rather than record: --retry-empty
+        # deletes a range of it on purpose, so a legitimate push can shrink it,
+        # and guarding it would turn widening the site selection into a run
+        # that refuses to publish anything it scraped. The guard is there to
+        # protect eBird rows, which cannot be re-fetched for a day that has
+        # since aged out; losing a ledger row costs one re-scrape.
         shrunk = {t: (there[t], here.get(t, 0)) for t in there
-                  if here.get(t, 0) < there[t]}
+                  if t not in PRUNABLE and here.get(t, 0) < there[t]}
         if shrunk:
             sys.exit(
                 f"refusing to push: this would shrink {repo}.\n" +

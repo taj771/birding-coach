@@ -24,10 +24,19 @@ sixty-seven counties each a third done — the first is a usable model, the
 second is not.
 
 RESUMABLE
-Region-days already in the database are skipped, so re-running costs nothing
-and an interrupted run continues where it stopped. That is a query rather than
-a bookmark, so it survives a job being killed, a cache being evicted, or a run
+Region-days already fetched are skipped, so re-running costs nothing and an
+interrupted run continues where it stopped. That is a query rather than a
+bookmark, so it survives a job being killed, a cache being evicted, or a run
 that never started.
+
+"Already fetched" means two things, and it used to mean only the first. A
+region-day holding a checklist is done. A region-day that was fetched and
+stored nothing is also done — most of rural Pennsylvania files its birding at
+personal locations, which the site selection discards, so a day can be
+genuinely empty here while being a busy day out there. Judging only by stored
+rows made every such day look untouched forever, and four runs a day spent
+almost all of their five hours re-fetching them. scrape_attempts records the
+fetch itself; --retry-empty forgets it when the site selection widens.
 
 TIME BUDGET
 A GitHub job is killed at six hours; ours stops itself at five. Being killed
@@ -176,17 +185,95 @@ def stored_by_region():
 
 
 def already_have():
-    """{(region, date)} already scraped."""
+    """{(region, date)} not worth fetching again.
+
+    Two sources, and the second is not redundant with the first. A region-day
+    holding a checklist is obviously done. A region-day this script has already
+    fetched is also done even when it stored nothing — see record_attempts for
+    why that case is the common one rather than an exotic one.
+
+    Both are queries against the shared database rather than a bookmark beside
+    it, so the skip list still survives a job being killed, a cache being
+    evicted, or a run that never started.
+    """
     if not DB.exists() or DB.stat().st_size == 0:
         return set()
     con = duckdb.connect(str(DB), read_only=True)
-    try:
-        rows = con.execute(
-            "select distinct region, obs_date from checklists").fetchall()
-    except duckdb.Error:
-        rows = []
+    rows = []
+    for sql in ("select distinct region, obs_date from checklists",
+                "select region, obs_date from scrape_attempts"):
+        try:
+            rows += con.execute(sql).fetchall()
+        except duckdb.Error:
+            # Either table can be absent: a database built before the ledger
+            # existed has no scrape_attempts, and an empty one has neither.
+            # A missing table means nothing is known, not that nothing is done.
+            pass
     con.close()
     return {(r[0], r[1]) for r in rows}
+
+
+def record_attempts(region, dates):
+    """Note that these region-days were fetched, whatever they yielded.
+
+    Without this the skip list is `select distinct region, obs_date from
+    checklists`, which can only see a day that produced a row. A day where all
+    the birding was filed at personal locations, or at hotspots outside the
+    selected list, stores nothing — so it reads as unscraped forever and every
+    later run fetches it again.
+
+    That is not a corner case at this scale. On the 2026-08-31 run, 1,096 of
+    the 1,139 region-days fetched stored nothing, and every one of them had
+    activity that day which the site selection discarded. At about seven
+    seconds a call that is most of a five-hour job spent re-confirming the same
+    emptiness, four times a day, forever.
+
+    Written after the scrape succeeds and before the push, so the ledger only
+    ever travels with the rows it describes. A run killed mid-chunk records
+    nothing for that chunk, and the next run simply does it again.
+    """
+    import sync_db
+
+    con = duckdb.connect(str(DB))
+    con.execute(sync_db.ATTEMPTS_DDL)
+    # `or ignore` rather than a lookup: the same region-day is legitimately
+    # re-fetched when --retry-empty widens the site list mid-range, and the
+    # first attempt's timestamp is the one worth keeping.
+    con.executemany(
+        "insert or ignore into scrape_attempts (region, obs_date, scraped_at) "
+        "values (?, ?, current_timestamp)",
+        [(region, d) for d in dates])
+    con.close()
+
+
+def clear_attempts(regions, start, end):
+    """Forget the attempts in this range, so empty region-days are retried.
+
+    The ledger makes a region-day that stored nothing permanent, which is
+    correct while the site selection stays put and wrong the moment it moves.
+    Raising PER_COUNTY_HOTSPOTS makes days that yielded nothing under the old
+    list capable of yielding something under the new one, and without this they
+    would never be asked again.
+
+    Only the ledger is cleared. Region-days that stored a checklist are skipped
+    by the checklists query regardless, so this cannot cause the same day to be
+    paid for twice.
+    """
+    if not DB.exists() or DB.stat().st_size == 0:
+        return 0
+    con = duckdb.connect(str(DB))
+    holes = ", ".join("?" * len(regions))
+    where = f"where region in ({holes}) and obs_date between ? and ?"
+    args = [*regions, start, end]
+    try:
+        n = con.execute(
+            f"select count(*) from scrape_attempts {where}", args).fetchone()[0]
+        con.execute(f"delete from scrape_attempts {where}", args)
+    except duckdb.Error:
+        # No ledger yet: nothing to forget, which is the answer, not a failure.
+        n = 0
+    con.close()
+    return n
 
 
 def expand(spec):
@@ -253,6 +340,12 @@ if __name__ == "__main__":
                    help="print the plan and the estimate, then exit")
     p.add_argument("--every", type=int, default=int(os.getenv("EVERY", "1")),
                    help="sample one day per N (7 = weekly); 1 scrapes them all")
+    # The counterpart to the ledger. Skipping a region-day that stored nothing
+    # is right while the site selection stays put, and wrong as soon as it
+    # widens — so widening it has to come with a way to ask those days again.
+    p.add_argument("--retry-empty", action="store_true",
+                   help="forget this range's attempts, so region-days that "
+                        "stored nothing are fetched again")
     a = p.parse_args()
 
     t0 = time.time()
@@ -292,6 +385,14 @@ if __name__ == "__main__":
 
     regions, volume, all_volume = expand(a.regions)
     days = sample_days(start, end, a.every)
+
+    # After the pull and before the queue: clearing a local ledger the pull is
+    # about to restore from the remote would do nothing at all.
+    if a.retry_empty:
+        n = clear_attempts(regions, start, end)
+        print(f"retry      forgot {n:,} attempts in range — region-days that "
+              f"stored nothing will be fetched again")
+
     have = already_have()
 
     # region-major: finish a county before starting the next one
@@ -362,6 +463,14 @@ if __name__ == "__main__":
             tot_c = sum(r[2] for r in have_rows)
             print(f"\nalready stored: {tot_c:,} checklists over {tot_d:,} "
                   f"region-days in {len(have_rows)} region(s)")
+            # The gap between the two is the whole point of the ledger, and it
+            # is large: it is every region-day that was fetched and had nothing
+            # the site selection would keep. Reading only the first number
+            # makes the coverage look far thinner than the work done.
+            empty = len(already_have()) - tot_d
+            if empty > 0:
+                print(f"                and {empty:,} more region-days fetched "
+                      f"that stored nothing — skipped, not missing")
             for region, days_n, n in have_rows[:15]:
                 print(f"  {region:<12} {days_n:>4} days  {n:>7,} checklists")
             if len(have_rows) > 15:
@@ -428,6 +537,10 @@ if __name__ == "__main__":
                 env = {"SCRAPE_REGION": region, "SCRAPE_SCOPE": a.regions}
                 run("scrape_ebird.py", env=env)
                 run("backfill_locations.py", env=env)
+                # Inside the try, so a scrape that died is not recorded as
+                # done; before the push, so the ledger ships with the rows it
+                # describes rather than a chunk behind them.
+                record_attempts(region, dates)
             finally:
                 run("sync_db.py", "push")
             done += len(dates)
