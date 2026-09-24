@@ -1,4 +1,5 @@
 # Birding Coach
+# Beta Version
 
 Every birding app tells you *where*. This one tells you *when*.
 
