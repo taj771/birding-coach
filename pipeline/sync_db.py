@@ -220,6 +220,70 @@ def push(repo, token):
         commit_message=f"sync: {counts(DB)}")
     print(f"pushed {REMOTE_NAME} ({mb:.1f} MB) to {repo} — {counts(DB)}")
     squash_if_long(api, repo)
+    publish_status(api)
+
+
+# Minimum gap between status.json updates.
+#
+# A backfill pushes every fifteen region-days, dozens of times a run. Each
+# status update is a commit to the public dataset, and a status that is at
+# most an hour stale is exactly as useful to a reader as one that is a minute
+# stale — so the extra commits would buy nothing but history.
+STATUS_EVERY_MIN = 60
+
+
+def publish_status(api):
+    """Aggregate counts for the public status strip on the portfolio page.
+
+    The row counts live in the PRIVATE dataset, which a browser cannot read,
+    so the page could otherwise only say when the model was fitted — not that
+    the scrape behind it is alive and growing. Only aggregates are published
+    here: counts, a date range, a species tally. No checklist, location or
+    observer, which keeps it inside eBird's terms the same way the
+    coefficients are.
+
+    Best effort, like the squash: the database push has already succeeded, and
+    a status file that failed to update must not fail the run.
+    """
+    public = os.getenv("HF_PUBLIC_DATASET", "").strip()
+    if not public:
+        return
+    import json
+    from datetime import datetime, timezone
+    import requests
+    try:
+        now = datetime.now(timezone.utc)
+        url = (f"https://huggingface.co/datasets/{public}"
+               "/resolve/main/status.json")
+        r = requests.get(url, timeout=15)
+        if r.ok:
+            last = datetime.fromisoformat(r.json()["updated_at"])
+            if (now - last).total_seconds() < STATUS_EVERY_MIN * 60:
+                return
+
+        con = duckdb.connect(str(DB), read_only=True)
+        first, last_day, days = con.execute(
+            "select min(obs_date), max(obs_date), count(distinct obs_date) "
+            "from checklists").fetchone()
+        species = con.execute(
+            "select count(distinct species_code) from observations").fetchone()[0]
+        con.close()
+
+        status = {
+            "updated_at": now.isoformat(timespec="seconds"),
+            "counts": counts(DB),
+            "species_seen": species,
+            "obs_dates": {"first": str(first), "last": str(last_day),
+                          "distinct": days},
+        }
+        api.upload_file(
+            path_or_fileobj=json.dumps(status, indent=1).encode(),
+            path_in_repo="status.json", repo_id=public, repo_type="dataset",
+            commit_message=f"status: {status['counts']}")
+        print(f"published status.json to {public}")
+    except Exception as e:
+        print(f"warning: could not publish status.json "
+              f"({type(e).__name__}: {e})")
 
 
 # Commits kept before the history is squashed to one.
