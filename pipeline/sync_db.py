@@ -219,6 +219,61 @@ def push(repo, token):
         repo_id=repo, repo_type="dataset",
         commit_message=f"sync: {counts(DB)}")
     print(f"pushed {REMOTE_NAME} ({mb:.1f} MB) to {repo} — {counts(DB)}")
+    squash_if_long(api, repo)
+
+
+# Commits kept before the history is squashed to one.
+#
+# Every push stores the database whole as a new LFS object, and HF keeps every
+# version it has ever been given. With a backfill pushing every fifteen
+# region-days that reached 1,000+ commits and the 100 GB private-storage cap by
+# 2026-09-22, after which every run scraped for hours and then failed at the
+# push — losing the work, since the actions cache only saves on success.
+#
+# The old versions buy almost nothing: the shrink guard above already stops
+# the destructive push they would be a backup against, and eBird can re-supply
+# anything still inside its window. A short tail is kept rather than none so a
+# bad push can still be rolled back by hand for a few runs.
+KEEP_COMMITS = 20
+
+
+def squash_if_long(api, repo):
+    """Collapse the dataset's history once it passes KEEP_COMMITS.
+
+    The squashed commit reuses the latest message, because remote_counts()
+    reads the published row counts off it — a generic message would switch the
+    shrink guard off for the next push. Best effort: a failed squash leaves a
+    good push in place, and the next push tries again.
+
+    Squashing alone frees nothing. Found on 2026-09-27: after the squash the
+    repo still reported 99.97 GB, because HF keeps every LFS object it was ever
+    sent until it is deleted explicitly. So the objects the current files no
+    longer point at are deleted here too — that step is what actually returns
+    the storage.
+    """
+    try:
+        commits = api.list_repo_commits(repo, repo_type="dataset")
+        if len(commits) <= KEEP_COMMITS:
+            return
+        api.super_squash_history(repo_id=repo, repo_type="dataset",
+                                 commit_message=commits[0].title)
+        info = api.dataset_info(repo, files_metadata=True)
+        keep = {s.lfs.sha256 for s in info.siblings if s.lfs}
+        # an empty keep set would mean every object is "orphaned", including
+        # the live database — refuse rather than trust that
+        if not keep:
+            raise RuntimeError("no live LFS files found; not deleting any")
+        orphans = [f for f in api.list_lfs_files(repo, repo_type="dataset")
+                   if f.file_oid not in keep]
+        for i in range(0, len(orphans), 100):
+            api.permanently_delete_lfs_files(
+                repo, orphans[i:i + 100], repo_type="dataset",
+                rewrite_history=False)
+        print(f"squashed {len(commits)} commits of {repo} history into one "
+              f"and freed {len(orphans)} old database copies")
+    except Exception as e:
+        print(f"warning: could not squash {repo} history "
+              f"({type(e).__name__}: {e}) — will retry on the next push")
 
 
 if __name__ == "__main__":
